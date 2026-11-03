@@ -5,6 +5,9 @@ from typing import Any
 
 
 LABELS = {
+    "agent_roles": {"Product": "产品", "Architect": "架构", "Developer": "开发", "Test": "测试", "Curator": "知识治理", "Orchestrator": "任务协调"},
+    "task_statuses": {"CREATED": "已创建", "READY": "待领取", "RUNNING": "执行中", "PROPOSED": "产物待校验", "VALIDATING": "等待显式确认",
+                      "COMPLETED": "已完成", "FAILED": "已失败", "BLOCKED": "已阻塞", "NEEDS_HUMAN_REVIEW": "需要人工复核", "CANCELLED": "已取消"},
     "proposal_statuses": {"pending": "待校验", "validated": "校验通过", "committed": "已提交", "rejected": "已拒绝"},
     "entity_kinds": {
         "Project": "项目", "Domain": "业务领域", "Requirement": "需求",

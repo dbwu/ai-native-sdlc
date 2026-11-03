@@ -1,6 +1,6 @@
-# 工程知识平台——第一、二阶段
+# 工程知识平台——第一至第三阶段
 
-面向 AI 原生软件开发生命周期（AI Native SDLC）的可运行知识底座。第一阶段提供 12 种核心实体、9 种关系类型、稳定 UUID、来源追踪、固定版本的证据引用、不可变修订历史和生命周期校验；第二阶段在此基础上增加来源采集、结构化解析、变更提案、校验与提交、影响分析和一致性检查。两阶段均不包含 Agent 或编排能力。
+面向 AI 原生软件开发生命周期（AI Native SDLC）的可运行知识与协作底座。第一阶段提供 12 种核心实体、9 种关系类型、稳定 UUID、来源追踪、固定版本的证据引用、不可变修订历史和生命周期校验；第二阶段增加来源采集、结构化解析、变更提案、校验与提交、影响分析和一致性检查；第三阶段提供 Agent 注册、任务分发、版本化上下文及协作状态管理。第四阶段的端到端研发自动流水线尚未实现。
 
 初始目录仅包含项目说明和空的只读 `sources/` 目录，没有需要沿用的代码库或技术栈。实现文件均为新增，同步参考资料未作修改。
 
@@ -69,6 +69,34 @@ python -m knowledge.operations_demo
 | GET | `/operations/consistency?project_id=…` | 查询陈旧引用、冲突和链路缺口警告 |
 
 同一来源版本和原文的重复采集会返回原提案；变更原文需使用新的 `source_revision`。校验和提交使用提案自己的 `expected_version`，与实体内容版本分开。出现新来源快照或并发知识修订时，旧提案不会自动重放到新基线，需要重新采集或创建新修订提案。详细请求示例和规则见[第二阶段说明](docs/phase2-design.md)。
+
+## 第三阶段：Agent 运行时与协作
+
+已有数据库运行 `python -m knowledge.db` 应用第三阶段新增迁移，然后启动 API。可执行本地合成演示：
+
+```sh
+python -m knowledge.runtime_demo
+```
+
+演示把 Agent 注册、任务入队、能力匹配领取、固定版本上下文、结构化产物、知识提案、显式审核提交和依赖任务完成串起来。它使用确定性适配器，不调用外部大模型，不执行脚本，也不代表已经完成真实代码开发或测试。
+
+| 方法 | 路由 | 行为 |
+|---|---|---|
+| GET | `/runtime/contract` | 查询统一 Agent 契约与运行边界 |
+| POST／GET | `/runtime/agents` | 注册或分页查询项目 Agent |
+| GET | `/runtime/agents/{id}` | 查询角色、能力、知识范围及状态 |
+| POST | `/runtime/agents/{id}/state` | 启用／禁用，追加状态事件 |
+| POST／GET | `/runtime/tasks` | 创建或分页查询项目任务 |
+| GET | `/runtime/tasks/{id}` | 读取任务定义及最新状态 |
+| GET | `/runtime/tasks/{id}/history` | 读取不可变协作历史 |
+| GET | `/runtime/tasks/{id}/context` | 读取最近领取时固定的上下文包 |
+| POST | `/runtime/tasks/{id}/ready`、`/runtime/tasks/{id}/cancel` | 显式入队／恢复或取消任务 |
+| POST | `/runtime/claim` | 领取满足能力、依赖和读取范围的任务租约 |
+| POST | `/runtime/tasks/{id}/heartbeat`、`/runtime/tasks/{id}/report` | 续租或报告结果，检查令牌和当前任务版本 |
+| POST | `/runtime/tasks/{id}/validate`、`/runtime/tasks/{id}/complete` | 校验产物与提案，显式确认任务完成 |
+| GET | `/runtime/events?project_id=…&after=…` | 按项目游标轮询任务协作事件 |
+
+Agent 只可对其上下文中允许修订的版本提出候选变更，运行时不会替它自动提交知识。任务验收与外部工程事实核验分开：通过声明和语义校验后仍需明确确认；有关联知识提案时还需先通过第二阶段接口显式提交。租约超时在下一次匹配领取时处理，没有后台回收器。详细注册、任务与复核请求见[第三阶段说明](docs/phase3-design.md)。
 
 ## 核心概念
 
@@ -146,4 +174,4 @@ python -m pytest -q
 
 测试覆盖全部实体和关系类型、来源与类型化属性、修订及证据版本固定引用、乐观并发控制、历史记录、项目边界、防环校验（含并发建边）、验证证据、事务回滚、数据库记录不可变性、迁移重放，以及 API 搜索和筛选。
 
-[第一阶段设计与策略说明](docs/phase1-design.md)记录关系方向、生命周期规则和元模型扩展方式；[第二阶段设计与使用说明](docs/phase2-design.md)记录知识采集与提案闭环、分析规则、边界和待负责人确认的决策；[验证记录](docs/verification.md)列出已完成检查及环境限制。
+[第一阶段设计与策略说明](docs/phase1-design.md)记录关系方向、生命周期规则和元模型扩展方式；[第二阶段设计与使用说明](docs/phase2-design.md)记录知识采集与提案闭环；[第三阶段设计与使用说明](docs/phase3-design.md)记录 Agent 运行时、任务协作、上下文及待负责人确认的决策；[验证记录](docs/verification.md)列出已完成检查及环境限制。

@@ -1,5 +1,6 @@
 """知识操作：来源快照 → 不可变提案 → 事务校验 → 显式审核提交。"""
 import hashlib
+from contextlib import contextmanager
 from uuid import UUID, uuid4, uuid5
 
 from psycopg.types.json import Jsonb
@@ -19,8 +20,18 @@ class _PreviewRollback(Exception):
 
 
 class KnowledgeOperations:
-    def __init__(self, database_url: str):
+    def __init__(self, database_url: str, *, connection=None):
         self.database_url = database_url
+        self._connection = connection
+
+    @contextmanager
+    def _transaction(self):
+        if self._connection is None:
+            with connect(self.database_url) as conn:
+                yield conn
+        else:
+            with self._connection.transaction():
+                yield self._connection
 
     @staticmethod
     def _proposal(conn, proposal_id):
@@ -128,7 +139,7 @@ class KnowledgeOperations:
                 "message": "候选知识尚未入库；缺失来源键仅作提示，不自动删除或归档。"}
 
     def create_proposal(self, request: ProposalCreate):
-        with connect(self.database_url) as conn:
+        with self._transaction() as conn:
             KnowledgeService._lock(conn, request.project_id)
             KnowledgeService._assert_project(conn, request.project_id)
             seen = set()
@@ -204,7 +215,7 @@ class KnowledgeOperations:
     def review(self, proposal_id: UUID, request: ProposalReview, action: str):
         if action not in {"validate", "commit", "reject"}:
             raise ValueError("不支持的提案操作")
-        with connect(self.database_url) as conn:
+        with self._transaction() as conn:
             proposal = self._proposal(conn, proposal_id)
             KnowledgeService._lock(conn, proposal["project_id"])
             proposal = self._proposal(conn, proposal_id)
