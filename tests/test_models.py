@@ -12,7 +12,7 @@ def test_all_requested_types_and_api_are_discoverable():
     assert len(ATTRIBUTE_MODELS) == 12
     assert len(RelationType) == 9
     schema = create_app("unused").openapi()
-    assert schema["info"]["version"] == "0.4.0"
+    assert schema["info"]["version"] == "0.4.1"
     assert "/relationships/{relationship_id}/history" in schema["paths"]
 
 

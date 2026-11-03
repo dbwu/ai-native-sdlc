@@ -1,0 +1,4 @@
+<script setup lang="ts">
+import { state, openWorkflowForm } from '../store/workbench'
+</script>
+<template><div class="panel empty-state"><div class="empty-icon">◇</div><h2>{{ state.projectId ? '选择流程，继续逐步验证' : '创建你的第一个验证项目' }}</h2><p>{{ state.projectId ? '从左侧选择已有流程，或新建订单取消参考流程。页面会引导你运行、审阅和确认每一个阶段。' : '建立项目后，即可通过页面完成整个参考验证，无需填写技术编号或调用接口。' }}</p><RouterLink v-if="state.flowId" :to="`/workflows/${state.flowId}/overview`" class="button primary">进入最近的验证流程 →</RouterLink><button v-else class="button primary" :disabled="state.busy" @click="openWorkflowForm">{{ state.projectId ? '新建参考验证流程' : '创建验证项目' }}</button></div><section class="panel getting-started"><h2>页面验证顺序</h2><ol><li><strong>审阅初始化提案</strong><span>确认知识边界与初始产物，校验通过后由你提交。</span></li><li><strong>逐阶段运行和审阅</strong><span>每阶段运行参考 Agent，查看产物差异，确认任务与门禁。</span></li><li><strong>检查代码、测试与追溯</strong><span>最后查看真实测试结果、固定版本证据和操作记录。</span></li></ol></section></template>

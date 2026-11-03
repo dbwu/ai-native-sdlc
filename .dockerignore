@@ -3,4 +3,8 @@
 !requirements.lock
 !knowledge/
 !knowledge/**
+!frontend/
+!frontend/**
+frontend/node_modules/
+frontend/.vite/
 **/__pycache__/

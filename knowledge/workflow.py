@@ -1,5 +1,6 @@
 """四阶段 SDLC 流程：晚绑定任务、显式知识门禁与可核对的执行证据。"""
 from copy import deepcopy
+from contextlib import contextmanager
 import hashlib
 import json
 from uuid import UUID, uuid4
@@ -23,8 +24,18 @@ def _digest(content):
 
 
 class WorkflowService:
-    def __init__(self, database_url: str):
+    def __init__(self, database_url: str, *, connection=None):
         self.database_url = database_url
+        self._connection = connection
+
+    @contextmanager
+    def _transaction(self):
+        if self._connection is None:
+            with connect(self.database_url) as conn:
+                yield conn
+        else:
+            with self._connection.transaction():
+                yield self._connection
 
     @staticmethod
     def _get(conn, workflow_id):
@@ -55,7 +66,7 @@ class WorkflowService:
                     "rationale": "流程模板中的待确认追溯关系，需在阶段门禁中复核。"} for kind, source, target in relations]}
 
     def create(self, request: WorkflowCreate):
-        with connect(self.database_url) as conn:
+        with self._transaction() as conn:
             KnowledgeService._lock(conn, request.project_id)
             KnowledgeService._assert_project(conn, request.project_id)
             for ref in request.input_knowledge:
@@ -240,7 +251,7 @@ class WorkflowService:
         return True
 
     def control(self, workflow_id: UUID, request: WorkflowControl, action: str):
-        with connect(self.database_url) as conn:
+        with self._transaction() as conn:
             workflow = self._get(conn, workflow_id)
             KnowledgeService._lock(conn, workflow["project_id"])
             KnowledgeService._assert_project(conn, workflow["project_id"])
@@ -339,7 +350,7 @@ class WorkflowService:
             return self._get(conn, workflow_id)
 
     def execute_reference(self, workflow_id: UUID, request: ReferenceExecutionRequest):
-        with connect(self.database_url) as conn:
+        with self._transaction() as conn:
             workflow = self._get(conn, workflow_id)
             KnowledgeService._lock(conn, workflow["project_id"])
             KnowledgeService._assert_project(conn, workflow["project_id"])
@@ -369,29 +380,29 @@ class WorkflowService:
             return conn.execute("SELECT * FROM workflow_execution WHERE id=%s", (execution_id,)).fetchone()
 
     def get(self, workflow_id: UUID):
-        with connect(self.database_url) as conn:
+        with self._transaction() as conn:
             return self._get(conn, workflow_id)
 
     def list(self, project_id: UUID, status=None, limit=50, offset=0):
         KnowledgeService._page(limit, offset)
-        with connect(self.database_url) as conn:
+        with self._transaction() as conn:
             return conn.execute("""SELECT * FROM current_workflows WHERE project_id=%s AND (%s::text IS NULL OR status=%s)
                 ORDER BY created_at,id LIMIT %s OFFSET %s""", (project_id, status, status, limit, offset)).fetchall()
 
     def history(self, workflow_id: UUID, limit=50, offset=0):
         KnowledgeService._page(limit, offset)
-        with connect(self.database_url) as conn:
+        with self._transaction() as conn:
             self._get(conn, workflow_id)
             return conn.execute("SELECT * FROM workflow_event WHERE workflow_id=%s ORDER BY version DESC LIMIT %s OFFSET %s", (workflow_id, limit, offset)).fetchall()
 
     def tasks(self, workflow_id: UUID):
-        with connect(self.database_url) as conn:
+        with self._transaction() as conn:
             self._get(conn, workflow_id)
             rows = conn.execute("""SELECT t.*,w.stage,w.attempt AS stage_attempt FROM workflow_stage_task w
                 JOIN current_runtime_tasks t ON t.id=w.task_id WHERE w.workflow_id=%s ORDER BY w.stage,w.attempt""", (workflow_id,)).fetchall()
             return [AgentRuntime._public(row) for row in rows]
 
     def executions(self, workflow_id: UUID):
-        with connect(self.database_url) as conn:
+        with self._transaction() as conn:
             self._get(conn, workflow_id)
             return conn.execute("SELECT * FROM workflow_execution WHERE workflow_id=%s ORDER BY recorded_at,id", (workflow_id,)).fetchall()

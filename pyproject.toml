@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "engineering-knowledge"
-version = "0.4.0"
-description = "工程知识平台：知识模型、知识操作、Agent 协作与 SDLC 工作流"
+version = "0.4.1"
+description = "工程知识平台：知识模型、SDLC 协作与中文验证工作台"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115,<1",
@@ -21,7 +21,7 @@ test = ["pytest>=8,<10", "httpx>=0.27,<1"]
 include = ["knowledge*"]
 
 [tool.setuptools.package-data]
-knowledge = ["migrations/*.sql"]
+knowledge = ["migrations/*.sql", "web/*", "web/assets/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

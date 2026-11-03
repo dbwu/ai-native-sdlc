@@ -1,0 +1,13 @@
+<script setup lang="ts">
+import { computed, nextTick, reactive, ref, watch } from 'vue'
+import { state, runAction, action } from '../store/workbench'
+import { actionDescriptions, actionNames } from '../lib/display'
+const dialog=ref<HTMLDialogElement>(), error=ref(''), form=reactive({actor:'',reason:'',confirmed:false})
+const confirm=computed(()=>['commit_proposal','advance','cancel','reject_proposal','reject_task_and_retry'].includes(state.actionId))
+const title=computed(()=>action(state.actionId)?.label || actionNames[state.actionId] || '确认操作')
+const confirmText=computed(()=>state.actionId==='cancel'?'我确认取消流程，已提交知识与历史记录会保留。':state.actionId.includes('reject')?'我确认拒绝这次变更，旧提案与任务记录会保留。':state.actionId==='advance'?'我已核对阶段门禁及其产物，确认放行。':'我已审阅本次变更内容及依据，确认提交。')
+watch(()=>state.actionId,async value=>{ await nextTick(); if(value){form.actor=state.actor;form.reason='';form.confirmed=false;error.value='';dialog.value?.showModal()}else dialog.value?.close() })
+function close(event?:Event){if(state.busy){event?.preventDefault();return}state.actionId=''}
+async function submit(){if(state.busy || (confirm.value && !form.confirmed))return;error.value='';try{await runAction(form.actor.trim(),form.reason.trim())}catch(failure){error.value=(failure as Error).message}}
+</script>
+<template><dialog ref="dialog" class="form-dialog" @cancel="close"><form @submit.prevent="submit"><div class="dialog-heading"><div><p class="eyebrow">审阅与确认</p><h2>{{ title }}</h2></div><button class="icon-button" type="button" :disabled="state.busy" aria-label="关闭" @click="close()">×</button></div><p class="dialog-description">{{ actionDescriptions[state.actionId] || '请核对当前状态，填写本次操作依据。' }}</p><label class="field">操作署名<input v-model="form.actor" required maxlength="100" autocomplete="name" placeholder="请输入你的姓名或本地署名" :disabled="state.busy"></label><label class="field">操作依据<textarea v-model="form.reason" required rows="3" maxlength="2000" placeholder="请记录你审阅了什么，以及本次操作的依据。" :disabled="state.busy"></textarea></label><label v-if="confirm" class="check-field"><input v-model="form.confirmed" type="checkbox" required :disabled="state.busy"><span>{{ confirmText }}</span></label><p v-if="error" class="form-error" role="alert">{{ error }}</p><div class="dialog-footer"><button class="button secondary" type="button" :disabled="state.busy" @click="close()">暂不操作</button><button class="button" :class="state.actionId.includes('reject') || state.actionId==='cancel' ? 'danger':'primary'" type="submit" :disabled="state.busy || !form.actor.trim() || !form.reason.trim() || (confirm && !form.confirmed)">{{ state.busy ? state.actionId==='run_reference_stage' ? '参考 Agent 运行中…' : '正在处理…' : title }}</button></div></form></dialog></template>
