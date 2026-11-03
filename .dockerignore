@@ -1,0 +1,6 @@
+*
+!pyproject.toml
+!requirements.lock
+!knowledge/
+!knowledge/**
+**/__pycache__/
