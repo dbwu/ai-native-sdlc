@@ -20,6 +20,7 @@ from .semantics import KnowledgeError, RULES
 from .service import KnowledgeService
 from .operations_api import operations_router
 from .runtime_api import runtime_router
+from .workflow_api import workflow_router
 
 
 class EntityView(EntityContent):
@@ -50,8 +51,8 @@ class RelationView(RelationContent):
 
 def create_app(url: str | None = None) -> FastAPI:
     app = FastAPI(
-        title="工程知识模型 API", version="0.3.0",
-        description="AI 原生 SDLC 第一至三阶段，元模型版本 1。提供知识模型、知识操作与 Agent 协作运行时。"
+        title="工程知识模型 API", version="0.4.0",
+        description="AI 原生 SDLC 第一至四阶段，元模型版本 1。提供知识模型、知识操作、Agent 协作与带显式门禁的 SDLC 流程。"
                     "供本地或可信环境使用；调用方提交的操作者信息仅用于归属记录，不代表已完成身份认证。"
                     "字段名、枚举值和路由保持稳定，中文名称可通过 /metamodel 查询。",
         openapi_tags=[
@@ -173,6 +174,7 @@ def create_app(url: str | None = None) -> FastAPI:
 
     app.include_router(operations_router(lambda: url or database_url()))
     app.include_router(runtime_router(lambda: url or database_url()))
+    app.include_router(workflow_router(lambda: url or database_url()))
     return app
 
 

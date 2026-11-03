@@ -5,6 +5,7 @@ from typing import Any
 
 
 LABELS = {
+    "workflow_statuses": {"DRAFT": "草稿", "RUNNING": "阶段运行中", "AWAITING_GATE": "等待门禁确认", "PAUSED": "暂停推进", "BLOCKED": "需要处理", "COMPLETED": "已完成", "CANCELLED": "已取消"},
     "agent_roles": {"Product": "产品", "Architect": "架构", "Developer": "开发", "Test": "测试", "Curator": "知识治理", "Orchestrator": "任务协调"},
     "task_statuses": {"CREATED": "已创建", "READY": "待领取", "RUNNING": "执行中", "PROPOSED": "产物待校验", "VALIDATING": "等待显式确认",
                       "COMPLETED": "已完成", "FAILED": "已失败", "BLOCKED": "已阻塞", "NEEDS_HUMAN_REVIEW": "需要人工复核", "CANCELLED": "已取消"},

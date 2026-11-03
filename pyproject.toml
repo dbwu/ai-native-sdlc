@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "engineering-knowledge"
-version = "0.3.0"
-description = "工程知识平台：知识模型、知识操作与 Agent 协作运行时"
+version = "0.4.0"
+description = "工程知识平台：知识模型、知识操作、Agent 协作与 SDLC 工作流"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115,<1",

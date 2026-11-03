@@ -3,7 +3,7 @@ from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, field_validator, model_validator
 
 
 class Kind(StrEnum):
@@ -55,6 +55,7 @@ class StrictModel(BaseModel):
 
 Text = Annotated[str, Field(min_length=1, max_length=4000)]
 Version = Annotated[int, Field(strict=True, ge=1)]
+_JSON_EXTENSIONS = TypeAdapter(dict[str, JsonValue], config=ConfigDict(str_strip_whitespace=False))
 
 
 def validate_uri(value: str) -> str:
@@ -90,6 +91,12 @@ class Attributes(StrictModel):
 
     # 通过明确的扩展入口承载领域属性，不接受拼错的核心字段。
     extensions: dict[str, JsonValue] = Field(default_factory=dict, title="扩展属性", description="存放尚未纳入核心元模型的领域 JSON 属性。")
+
+    @field_validator("extensions", mode="wrap")
+    @classmethod
+    def preserve_json_strings(cls, value, handler):
+        # 扩展内容可能包含源码。仍校验 JSON 类型，但不沿用说明文字的去空白规则。
+        return _JSON_EXTENSIONS.validate_python(value)
 
 
 class ProjectAttributes(Attributes):

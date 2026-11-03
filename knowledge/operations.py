@@ -57,7 +57,7 @@ class KnowledgeOperations:
     def ingest(self, request: IngestionRequest):
         candidates = parse_source(request.format, request.content)
         digest = hashlib.sha256(request.content.encode("utf-8")).hexdigest()
-        with connect(self.database_url) as conn:
+        with self._transaction() as conn:
             KnowledgeService._lock(conn, request.project_id)
             KnowledgeService._assert_project(conn, request.project_id)
             source = conn.execute("SELECT * FROM knowledge_source WHERE project_id=%s AND uri=%s",

@@ -1,5 +1,6 @@
 """持久化的本地 Agent 协作运行时；不执行任意脚本或自动提交工程知识。"""
 from copy import deepcopy
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 import hashlib
 import json
@@ -22,9 +23,19 @@ TERMINAL = {"COMPLETED", "FAILED", "CANCELLED"}
 
 
 class AgentRuntime:
-    def __init__(self, database_url: str):
+    def __init__(self, database_url: str, *, connection=None):
         self.database_url = database_url
         self.context = ContextBuilder(database_url)
+        self._connection = connection
+
+    @contextmanager
+    def _transaction(self):
+        if self._connection is None:
+            with connect(self.database_url) as conn:
+                yield conn
+        else:
+            with self._connection.transaction():
+                yield self._connection
 
     @staticmethod
     def _now(conn):
@@ -65,7 +76,7 @@ class AgentRuntime:
             (task["id"], task.get("version", 0) + 1, status, action, actor, reason, Jsonb(runtime)))
 
     def register_agent(self, request: AgentCreate):
-        with connect(self.database_url) as conn:
+        with self._transaction() as conn:
             KnowledgeService._lock(conn, request.project_id)
             KnowledgeService._assert_project(conn, request.project_id)
             if conn.execute("SELECT 1 FROM runtime_agent WHERE project_id=%s AND name=%s", (request.project_id, request.name)).fetchone():
@@ -80,7 +91,7 @@ class AgentRuntime:
             return self._agent(conn, agent_id)
 
     def change_agent(self, agent_id: UUID, request: AgentStateChange):
-        with connect(self.database_url) as conn:
+        with self._transaction() as conn:
             agent = self._agent(conn, agent_id)
             KnowledgeService._lock(conn, agent["project_id"])
             KnowledgeService._assert_project(conn, agent["project_id"])
@@ -92,12 +103,12 @@ class AgentRuntime:
 
     def list_agents(self, project_id: UUID, limit=50, offset=0):
         KnowledgeService._page(limit, offset)
-        with connect(self.database_url) as conn:
+        with self._transaction() as conn:
             return conn.execute("SELECT * FROM current_runtime_agents WHERE project_id=%s ORDER BY created_at,id LIMIT %s OFFSET %s",
                                 (project_id, limit, offset)).fetchall()
 
     def create_task(self, request: TaskCreate):
-        with connect(self.database_url) as conn:
+        with self._transaction() as conn:
             KnowledgeService._lock(conn, request.project_id)
             KnowledgeService._assert_project(conn, request.project_id)
             for ref in request.input_knowledge:
@@ -129,7 +140,7 @@ class AgentRuntime:
         return agent
 
     def claim(self, request: ClaimRequest):
-        with connect(self.database_url) as conn:
+        with self._transaction() as conn:
             agent = self._agent(conn, request.agent_id)
             KnowledgeService._lock(conn, agent["project_id"])
             KnowledgeService._assert_project(conn, agent["project_id"])
@@ -178,7 +189,7 @@ class AgentRuntime:
             return {"task": None, "lease_token": None}
 
     def heartbeat(self, task_id: UUID, request: LeaseRequest):
-        with connect(self.database_url) as conn:
+        with self._transaction() as conn:
             task = self._task(conn, task_id)
             KnowledgeService._lock(conn, task["project_id"])
             KnowledgeService._assert_project(conn, task["project_id"])
@@ -222,7 +233,7 @@ class AgentRuntime:
             change.data.provenance = change.data.provenance.model_copy(update={"nature": "inference", "actor": "agent:" + str(agent["id"])})
 
     def report(self, task_id: UUID, request: TaskReport):
-        with connect(self.database_url) as conn:
+        with self._transaction() as conn:
             task = self._task(conn, task_id)
             KnowledgeService._lock(conn, task["project_id"])
             KnowledgeService._assert_project(conn, task["project_id"])
@@ -266,7 +277,7 @@ class AgentRuntime:
             return self._public(self._task(conn, task_id))
 
     def control(self, task_id: UUID, request: TaskControl, action: str):
-        with connect(self.database_url) as conn:
+        with self._transaction() as conn:
             task = self._task(conn, task_id)
             KnowledgeService._lock(conn, task["project_id"])
             KnowledgeService._assert_project(conn, task["project_id"])
@@ -329,15 +340,15 @@ class AgentRuntime:
             return self._public(self._task(conn, task_id))
 
     def get_task(self, task_id: UUID):
-        with connect(self.database_url) as conn:
+        with self._transaction() as conn:
             return self._public(self._task(conn, task_id))
 
     def get_agent(self, agent_id: UUID):
-        with connect(self.database_url) as conn:
+        with self._transaction() as conn:
             return self._agent(conn, agent_id)
 
     def get_context(self, task_id: UUID):
-        with connect(self.database_url) as conn:
+        with self._transaction() as conn:
             task = self._task(conn, task_id)
             if not task["runtime"]["context_id"]:
                 raise KnowledgeError("任务尚未领取，没有上下文包", 404)
@@ -346,7 +357,7 @@ class AgentRuntime:
 
     def list_tasks(self, project_id: UUID, status=None, limit=50, offset=0):
         KnowledgeService._page(limit, offset)
-        with connect(self.database_url) as conn:
+        with self._transaction() as conn:
             rows = conn.execute("""SELECT * FROM current_runtime_tasks WHERE project_id=%s
                 AND (%s::text IS NULL OR status=%s) ORDER BY created_at,id LIMIT %s OFFSET %s""",
                 (project_id, status, status, limit, offset)).fetchall()
@@ -354,7 +365,7 @@ class AgentRuntime:
 
     def history(self, task_id: UUID, limit=50, offset=0):
         KnowledgeService._page(limit, offset)
-        with connect(self.database_url) as conn:
+        with self._transaction() as conn:
             self._task(conn, task_id)
             rows = conn.execute("SELECT * FROM runtime_task_event WHERE task_id=%s ORDER BY version DESC LIMIT %s OFFSET %s",
                                 (task_id, limit, offset)).fetchall()
@@ -364,7 +375,7 @@ class AgentRuntime:
         KnowledgeService._page(limit, 0)
         if after < 0:
             raise KnowledgeError("事件游标不能为负数")
-        with connect(self.database_url) as conn:
+        with self._transaction() as conn:
             # 与项目内写入共享锁，避免尚未提交的较小事件编号被游标越过。
             KnowledgeService._lock(conn, project_id)
             rows = conn.execute("""SELECT e.* FROM runtime_task_event e JOIN runtime_task t ON t.id=e.task_id
