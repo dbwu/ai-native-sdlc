@@ -16,24 +16,30 @@ from .semantics import (
 
 
 class KnowledgeService:
-    """All semantic writes go through this transactional boundary.
+    """所有知识写入都必须经过此处的事务和语义校验。
 
-    Project advisory locks serialize graph validation and revision allocation.
-    expected_version prevents silently overwriting a concurrent author's work.
+    项目级咨询锁将图关系校验和修订版本分配串行化。
+    expected_version 用于避免无提示地覆盖其他提交者的并发修改。
     """
 
-    def __init__(self, database_url: str):
+    def __init__(self, database_url: str, *, connection=None):
         self.database_url = database_url
+        # 第二阶段批量提案共用外层事务；单个操作仍通过保存点隔离失败。
+        self._connection = connection
 
     @contextmanager
     def _transaction(self):
         try:
-            with connect(self.database_url) as conn:
-                yield conn
+            if self._connection is not None:
+                with self._connection.transaction():
+                    yield self._connection
+            else:
+                with connect(self.database_url) as conn:
+                    yield conn
         except psycopg.errors.UniqueViolation as exc:
-            raise KnowledgeError("Identity or relationship already exists", 409) from exc
+            raise KnowledgeError("实体标识或关系已存在", 409) from exc
         except psycopg.IntegrityError as exc:
-            raise KnowledgeError("Database integrity constraint rejected the write") from exc
+            raise KnowledgeError("写入不满足数据库完整性约束") from exc
 
     @staticmethod
     def _lock(conn, project_id):
@@ -41,7 +47,7 @@ class KnowledgeService:
 
     @staticmethod
     def _get(conn, table, record_id, version=None):
-        # table is an internal constant, never an API parameter.
+        # table 仅使用内部常量，不接受 API 参数输入。
         if version is None:
             view = "current_entities" if table == "entity" else "current_relationships"
             row = conn.execute(f"SELECT * FROM {view} WHERE id=%s", (record_id,)).fetchone()
@@ -52,7 +58,8 @@ class KnowledgeService:
                 FROM {table} e JOIN {table}_revision r ON e.id=r.{table}_id
                 WHERE e.id=%s AND r.version=%s""", (record_id, version)).fetchone()
         if row is None:
-            raise KnowledgeError(f"{table} or revision not found", 404)
+            label = "实体" if table == "entity" else "关系"
+            raise KnowledgeError(f"未找到指定{label}或修订版本", 404)
         evidence = conn.execute(f"""SELECT evidence_id AS id, evidence_version AS version
             FROM {table}_evidence WHERE {table}_id=%s AND version=%s
             ORDER BY evidence_id, evidence_version""", (row["id"], row["version"])).fetchall()
@@ -63,9 +70,9 @@ class KnowledgeService:
     def _assert_project(conn, project_id):
         project = KnowledgeService._get(conn, "entity", project_id)
         if project["kind"] != Kind.PROJECT:
-            raise KnowledgeError("project_id must identify a Project")
+            raise KnowledgeError("project_id 必须指向项目类型 Project 的实体")
         if project["status"] == "archived":
-            raise KnowledgeError("Project is archived", 409)
+            raise KnowledgeError("项目已归档，不能再写入知识", 409)
 
     @staticmethod
     def _check_evidence(conn, project_id, refs):
@@ -73,7 +80,7 @@ class KnowledgeService:
         for ref in refs:
             record = KnowledgeService._get(conn, "entity", ref.id, ref.version)
             if record["kind"] != Kind.EVIDENCE or record["project_id"] != project_id:
-                raise KnowledgeError("Evidence must reference an Evidence revision in the same project")
+                raise KnowledgeError("证据必须引用同一项目内 Evidence 实体的具体修订版本")
             records.append(record)
         return records
 
@@ -90,11 +97,11 @@ class KnowledgeService:
         if identity["kind"] == Kind.EVIDENCE and attributes.subject_id:
             subject = self._get(conn, "entity", attributes.subject_id, attributes.subject_version)
             if subject["project_id"] != identity["project_id"]:
-                raise KnowledgeError("Evidence subject must belong to the same project")
+                raise KnowledgeError("证据所指实体必须属于同一项目")
             if attributes.category == "test_execution" and subject["kind"] != Kind.TEST:
-                raise KnowledgeError("test_execution evidence must refer to a TestCase revision")
+                raise KnowledgeError("测试执行证据必须指向测试用例 TestCase 的具体修订版本")
             if attributes.category == "code" and subject["kind"] not in {Kind.CODE, Kind.COMPONENT}:
-                raise KnowledgeError("code evidence must refer to a CodeArtifact or ArchitectureComponent revision")
+                raise KnowledgeError("代码证据必须指向代码资产 CodeArtifact 或架构组件 ArchitectureComponent 的具体修订版本")
         document = {
             "name": content.name, "description": content.description,
             "attributes": attributes.model_dump(mode="json"),
@@ -104,8 +111,8 @@ class KnowledgeService:
             VALUES (%s,%s,%s,%s)""", (identity["id"], version, content.status.value, Jsonb(document)))
         self._append_evidence(conn, "entity", identity["id"], version, content.evidence)
 
-    def create_entity(self, request: EntityCreate):
-        record_id = uuid4()
+    def create_entity(self, request: EntityCreate, *, _record_id: UUID | None = None):
+        record_id = _record_id or uuid4()
         project_id = record_id if request.kind == Kind.PROJECT else request.project_id
         with self._transaction() as conn:
             self._lock(conn, project_id)
@@ -124,7 +131,7 @@ class KnowledgeService:
             original = self._get(conn, "entity", record_id)
             self._assert_project(conn, original["project_id"])
             if original["version"] != request.expected_version:
-                raise KnowledgeError("Stale expected_version; reload the current revision", 409)
+                raise KnowledgeError("expected_version 已过期，请读取最新修订后再提交", 409)
             validate_transition(original["status"], request.status, ENTITY_TRANSITIONS)
             self._entity_revision(conn, original, original["version"] + 1, request)
             return self._get(conn, "entity", record_id)
@@ -139,7 +146,7 @@ class KnowledgeService:
 
     def history(self, table, record_id: UUID, limit=50, offset=0):
         if table not in {"entity", "relationship"}:
-            raise ValueError("invalid history table")
+            raise ValueError("不支持的历史记录表")
         self._page(limit, offset)
         with connect(self.database_url) as conn:
             self._get(conn, table, record_id)
@@ -151,7 +158,7 @@ class KnowledgeService:
     @staticmethod
     def _page(limit, offset):
         if not 1 <= limit <= 200 or offset < 0:
-            raise KnowledgeError("limit must be 1..200 and offset must be nonnegative")
+            raise KnowledgeError("limit 必须为 1 至 200，offset 必须大于或等于 0")
 
     def list_entities(self, project_id: UUID, kind=None, status=None, q=None, limit=50, offset=0):
         self._page(limit, offset)
@@ -174,7 +181,7 @@ class KnowledgeService:
                            status=None, direction="both", limit=50, offset=0):
         self._page(limit, offset)
         if direction not in {"both", "outbound", "inbound"}:
-            raise KnowledgeError("invalid relationship direction")
+            raise KnowledgeError("不支持的关系方向，请使用 both、outbound 或 inbound")
         clauses, params = ["project_id=%s"], [project_id]
         if entity_id is not None:
             if direction == "both":
@@ -206,7 +213,7 @@ class KnowledgeService:
         ) SELECT 1 FROM reachable WHERE id=%s LIMIT 1""",
             (identity["target_id"], identity["project_id"], identity["type"], identity["id"], identity["source_id"])).fetchone()
         if cycle:
-            raise KnowledgeError(f"{identity['type']} would form a cycle", 409)
+            raise KnowledgeError(f"该 {identity['type']} 关系会形成环路", 409)
 
     def _relationship_revision(self, conn, identity, version, content):
         source = self._get(conn, "entity", identity["source_id"], content.source_version)
@@ -215,15 +222,15 @@ class KnowledgeService:
         evidence = self._check_evidence(conn, identity["project_id"], content.evidence)
         if content.status in {"proposed", "verified"}:
             if source["status"] == "archived" or target["status"] == "archived":
-                raise KnowledgeError("Live relationships cannot pin archived endpoint revisions")
+                raise KnowledgeError("待确认或已验证的关系不能引用已归档的端点修订版本")
             self._no_cycle(conn, identity)
         if content.status == "verified":
             if content.provenance.nature not in {"fact", "human_confirmed"}:
-                raise KnowledgeError("Verified relationships cannot be an inference or assumption")
+                raise KnowledgeError("已验证关系的来源性质不能是推断或假设")
             active_evidence = [e for e in evidence if e["status"] == "active"
                                and e["provenance"]["nature"] in {"fact", "human_confirmed"}]
             if not active_evidence:
-                raise KnowledgeError("Verified relationships require active evidence")
+                raise KnowledgeError("已验证关系需要生效且性质为事实或人工确认的证据")
             required_category = {"IMPLEMENTED_BY": "code", "VERIFIED_BY": "test_execution"}.get(identity["type"])
             if required_category:
                 matching = [e for e in active_evidence if (
@@ -233,7 +240,8 @@ class KnowledgeService:
                     and (required_category != "test_execution" or e["attributes"]["outcome"] == "passed")
                 )]
                 if not matching:
-                    raise KnowledgeError(f"Verified {identity['type']} requires matching {required_category} evidence for the pinned target revision")
+                    category_label = "代码证据" if required_category == "code" else "结果为通过的测试执行证据"
+                    raise KnowledgeError(f"已验证的 {identity['type']} 关系需要与目标实体具体版本匹配的{category_label}")
         document = {"rationale": content.rationale, "provenance": content.provenance.model_dump(mode="json")}
         conn.execute("""INSERT INTO relationship_revision
             (relationship_id,version,source_id,target_id,source_version,target_version,status,document)
@@ -242,10 +250,10 @@ class KnowledgeService:
                 content.target_version, content.status.value, Jsonb(document)))
         self._append_evidence(conn, "relationship", identity["id"], version, content.evidence)
 
-    def create_relationship(self, request: RelationCreate):
+    def create_relationship(self, request: RelationCreate, *, _record_id: UUID | None = None):
         if request.source_id == request.target_id:
-            raise KnowledgeError("Self-relationships are not permitted")
-        # Canonical symmetric storage also prevents reverse duplicates.
+            raise KnowledgeError("不允许实体与自身建立关系")
+        # 对称关系采用统一的存储方向，同时避免反向重复。
         if request.type == RelationType.CONFLICTS_WITH and request.source_id > request.target_id:
             request = request.model_copy(update={
                 "source_id": request.target_id, "target_id": request.source_id,
@@ -257,8 +265,8 @@ class KnowledgeService:
             self._assert_project(conn, source["project_id"])
             target = self._get(conn, "entity", request.target_id)
             if source["project_id"] != target["project_id"]:
-                raise KnowledgeError("Cross-project relationships are not permitted")
-            identity = {"id": uuid4(), "project_id": source["project_id"], "type": request.type.value,
+                raise KnowledgeError("不允许建立跨项目关系")
+            identity = {"id": _record_id or uuid4(), "project_id": source["project_id"], "type": request.type.value,
                         "source_id": request.source_id, "target_id": request.target_id}
             conn.execute("""INSERT INTO relationship (id,project_id,type,source_id,target_id)
                 VALUES (%s,%s,%s,%s,%s)""", tuple(identity.values()))
@@ -272,7 +280,7 @@ class KnowledgeService:
             self._assert_project(conn, original["project_id"])
             original = self._get(conn, "relationship", record_id)
             if original["version"] != request.expected_version:
-                raise KnowledgeError("Stale expected_version; reload the current revision", 409)
+                raise KnowledgeError("expected_version 已过期，请读取最新修订后再提交", 409)
             validate_transition(original["status"], request.status, RELATION_TRANSITIONS)
             self._relationship_revision(conn, original, original["version"] + 1, request)
             return self._get(conn, "relationship", record_id)

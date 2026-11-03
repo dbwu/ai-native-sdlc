@@ -29,7 +29,8 @@ def test_migration_reentrant_and_database_immutable(db_url, project):
     migrate(db_url)
     migrate(db_url)
     with connect(db_url) as conn:
-        assert conn.execute("SELECT count(*) AS n FROM schema_migrations").fetchone()["n"] == 1
+        migrations = conn.execute("SELECT name FROM schema_migrations ORDER BY name").fetchall()
+        assert [row["name"] for row in migrations] == ["001_initial.sql", "002_knowledge_operations.sql"]
     with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
         with connect(db_url) as conn:
             conn.execute("UPDATE entity_revision SET status='draft' WHERE entity_id=%s", (project["id"],))

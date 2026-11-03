@@ -1,1 +1,1 @@
-"""Engineering Knowledge Model, metamodel version 1."""
+"""工程知识模型，元模型版本 1。"""

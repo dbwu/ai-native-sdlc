@@ -1,22 +1,35 @@
-# Verification
+# 验证记录
 
-Verified in this workspace using Python 3.14.0 and a temporary native PostgreSQL
-17.11 instance (portable binaries from [EDB](https://www.enterprisedb.com/download-postgresql-binaries)).
+已在本工作区使用 Python 3.14.0 和临时运行的原生 PostgreSQL 17.11 实例完成验证。PostgreSQL 便携二进制文件来自 [EDB](https://www.enterprisedb.com/download-postgresql-binaries)。
 
-- `python -m pytest -q`: **65 passed**, including 36 PostgreSQL integration cases.
-  The only warning is a dependency deprecation notice about the test client's
-  use of httpx; it does not affect test results.
-- Real Uvicorn HTTP smoke: health, interactive docs, metamodel, synthetic demo,
-  entity queries, and relationship queries passed. The demo created 15 entities
-  spanning all 12 kinds and 9 links spanning all 9 relationship types.
-- Migration command/replay passed against PostgreSQL. Tests also check database
-  immutability, failed-write rollback, and concurrent graph/revision writes.
-- Wheel build passed; the wheel contains the SQL migration alongside the Python
-  package. Runtime and test dependency resolutions are recorded in the lock files.
+- `python -m pytest -q`：**65 项通过**，其中包含 36 项 PostgreSQL 集成测试。唯一警告来自测试客户端使用 httpx 的依赖弃用提示，不影响测试结果。
+- 真实 Uvicorn HTTP 冒烟验证通过，覆盖健康检查、交互式接口文档、元模型、虚构演示数据、实体查询和关系查询。演示创建了 15 个实体，覆盖全部 12 种实体类型；创建了 9 条关系，覆盖全部 9 种关系类型。
+- 数据库迁移命令及重复执行检查通过。测试还覆盖数据库记录不可变性、失败写入回滚、图谱与修订的并发写入。
+- Wheel 安装包构建通过，已确认 SQL 迁移文件随 Python 包一同打包。运行与测试依赖的解析结果记录在锁定文件中。
 
-Docker is not installed in this environment, so the Compose image build/run was
-not executed. The API, migration, demo, and database behavior were verified natively.
-Python 3.11/3.12 and other PostgreSQL major versions were not exercised here.
+本环境未安装 Docker，因此没有执行 Compose 镜像构建或启动。API、迁移、演示和数据库行为均通过原生运行完成验证。Python 3.11／3.12 和其他 PostgreSQL 主版本尚未在此环境中验证。
 
-Temporary binaries, database files, package caches, and smoke artifacts are under
-ignored local directories and are not part of the implementation source.
+临时二进制文件、数据库文件、依赖缓存及冒烟验证产物均位于被忽略的本地目录，不属于交付源代码。
+
+## 中文化复验（2026-11-04）
+
+- 完整回归：**73 项通过**，包括原有的 36 项真实 PostgreSQL 集成测试，以及新增的 8 项中文显示与兼容性测试。依赖弃用警告与原始实现相同。
+- 新增检查覆盖中文 OpenAPI 摘要、字段名称、元模型名称映射、常见请求校验错误、自定义中文错误、服务层属性校验错误，以及未知底层错误的原样保留。
+- 中文演示通过真实 HTTP 写入和查询验证：全部 12 种实体、9 种关系均正常，中文名称往返读取一致。
+- 中文版 Wheel 重新构建通过，包含新增的中文名称和校验提示模块及原有 SQL 迁移文件。
+- API 路由、字段名、枚举值、状态码和既有数据库迁移内容保持兼容；`/metamodel` 额外提供 `labels` 中文名称映射。
+
+应用自有文案优先使用中文；第三方文档界面的内置按钮、未知底层错误和已执行迁移中的原有提示可能仍为英文。未改动 `sources/` 或同步项目说明。
+
+## 第二阶段复验（2026-11-04，版本 0.2.0）
+
+- 完整回归：**139 项通过**，其中 **64 项真实 PostgreSQL 集成测试**。保留原有第一阶段回归，并增加解析、提案、影响分析、一致性检查和并发测试。原有依赖弃用警告仍为 1 项。
+- 确定性解析：JSON 与显式 Markdown 知识块、类型和关系语义、规模限制、重复键／关系、非有限数值、无效 Unicode、NUL 和首尾空白键处理通过验证。
+- 受控写入：采集与试运行不发布知识；显式提交、整批回滚、稳定键身份复用、无变化不增加修订、来源／知识基线过期、拒绝终态、重复导入与重复提交均通过验证。
+- 并发：相同来源并发采集只生成一个快照／提案；同一提案并发提交只应用一次；竞争提案不能覆盖获胜方的修订。
+- 可追溯性：来源原文空白和 SHA-256 一致，来源、提案、审核事件与身份绑定均受只追加保护。来源更新保留实体生命周期，但不沿用旧内容的证据或自动提升知识性质。
+- 真实 HTTP 演示通过，覆盖新增采集 → 试运行 → 显式提交闭环、来源变更、手工生命周期修订、影响路径和一致性警告；第一阶段中文演示仍然通过。
+- 在既有本地第一阶段数据库上执行新增迁移并完成演示；隔离测试数据库覆盖全部迁移的重复执行。第一阶段 SQL 迁移未修改。
+- `0.2.0` Wheel 构建通过，包含第二阶段服务、解析、分析、示例命令及两份 SQL 迁移。没有新增运行依赖。
+
+本轮仍使用 Python 3.14.0 与 PostgreSQL 17.11。Docker Compose 未在此环境执行；外部连接器、自然语言大模型抽取和组织鉴权未纳入本阶段实现或验证。检查结束后临时数据库已停止。

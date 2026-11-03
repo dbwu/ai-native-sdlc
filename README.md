@@ -1,38 +1,29 @@
-# Engineering Knowledge Model — Phase 1
+# 工程知识平台——第一、二阶段
 
-Runnable knowledge foundation for AI Native SDLC: 12 entity kinds, 9 relationship
-types, stable UUIDs, provenance, pinned evidence, immutable revision history,
-lifecycle validation, and an HTTP/service API. No Agents or orchestration.
+面向 AI 原生软件开发生命周期（AI Native SDLC）的可运行知识底座。第一阶段提供 12 种核心实体、9 种关系类型、稳定 UUID、来源追踪、固定版本的证据引用、不可变修订历史和生命周期校验；第二阶段在此基础上增加来源采集、结构化解析、变更提案、校验与提交、影响分析和一致性检查。两阶段均不包含 Agent 或编排能力。
 
-The initial folder contained only project instructions and an empty read-only
-`sources/` directory. There was no codebase or stack to preserve. All implementation
-files are new; synced reference material is unchanged.
+初始目录仅包含项目说明和空的只读 `sources/` 目录，没有需要沿用的代码库或技术栈。实现文件均为新增，同步参考资料未作修改。
 
-## Run
+## 启动
 
-With Docker Compose:
+使用 Docker Compose：
 
 ```sh
 docker compose up --build
 ```
 
-Open [interactive API docs](http://127.0.0.1:8000/docs) or
-[health](http://127.0.0.1:8000/health). The database and API bind only to localhost.
-Compose uses explicitly local development credentials and persists data in a named
-volume. Migrations run transactionally before the API starts. Use `docker compose
-down` to stop; it preserves the volume.
+访问[交互式接口文档](http://127.0.0.1:8000/docs)或[健康检查](http://127.0.0.1:8000/health)。数据库和 API 仅绑定本机地址。Compose 使用本地开发凭据，并通过命名卷持久化数据。API 启动前会在事务中执行数据库迁移。运行 `docker compose down` 可停止服务，数据卷会保留。
 
-Alternatively, use Python 3.11+ and an existing PostgreSQL 17+ database. Create a
-virtual environment and install the pinned packages, then the project:
+也可以使用 Python 3.11+ 和现有的 PostgreSQL 17+ 数据库。先创建虚拟环境，安装锁定版本的依赖和项目：
 
 ```sh
 python -m venv .venv
-# Activate .venv for your shell.
+# 根据当前终端类型激活 .venv。
 python -m pip install -r requirements-test.lock
 python -m pip install --no-deps -e .
 ```
 
-Set `DATABASE_URL` in the shell (the app does not automatically load `.env`):
+在终端中设置 `DATABASE_URL`（应用不会自动加载 `.env`）：
 
 ```powershell
 $env:DATABASE_URL = 'postgresql://knowledge:local-dev-only@127.0.0.1:5432/knowledge'
@@ -40,96 +31,119 @@ python -m knowledge.db
 python -m uvicorn knowledge.api:app --host 127.0.0.1 --port 8000
 ```
 
-POSIX shells: `export DATABASE_URL='postgresql://…'`, then the same Python commands.
-To run only the Compose database: `docker compose up -d db`. Runtime-only
-installations can use `requirements.lock`; `requirements-test.lock` includes tests.
+POSIX 终端使用 `export DATABASE_URL='postgresql://…'`，然后执行相同的 Python 命令。仅启动 Compose 数据库可运行 `docker compose up -d db`。只需运行应用时可安装 `requirements.lock`；`requirements-test.lock` 还包含测试依赖。
 
-In another terminal, seed a **synthetic** example covering all entity and
-relationship types:
+在另一个终端中，写入覆盖全部实体和关系类型的**虚构演示数据**：
 
 ```sh
 python -m knowledge.demo
 ```
 
-It prints IDs for the created project, requirement, and relationships. Each run
-creates a separate project. Sample code and passed-test evidence are fabricated
-examples, not actual code verification or test execution.
+命令会输出新建项目、需求和关系的 ID。每次执行都会创建独立项目。示例代码和“测试通过”证据均为演示内容，不代表实际完成了代码验证或测试执行。
+
+## 第二阶段：采集与提案闭环
+
+已有数据库先再次运行 `python -m knowledge.db`，应用第二阶段新增迁移；不要修改旧迁移文件。服务启动后可运行：
+
+```sh
+python -m knowledge.operations_demo
+```
+
+演示通过 HTTP 展示来源采集、提案试运行校验、显式提交和只读分析。业务内容均为合成示例。可采集的原文样例见 [JSON 示例](examples/phase2-source.json)和 [Markdown 示例](examples/phase2-source.md)。
+
+采集入口接收原文内容，不自动访问 URI，也不调用外部大模型。解析只读取显式结构化实体和关系，不猜测普通自然语言含义。新候选实体为草稿，关系为待确认；校验通过后仍需显式提交，提交也不会把推断自动升级为事实。
+
+| 方法 | 路由 | 行为 |
+|---|---|---|
+| POST | `/operations/ingestions` | 保存来源快照并生成不可变变更提案 |
+| GET | `/operations/sources?project_id=…` | 查询各来源的最新版本与摘要 |
+| GET | `/operations/sources/{source_id}/versions/{version}` | 读取不可变来源原文 |
+| POST | `/operations/proposals` | 为已有实体或关系提出完整修订 |
+| GET | `/operations/proposals?project_id=…` | 查询提案，可按状态筛选 |
+| GET | `/operations/proposals/{id}` | 读取计划、基线、身份映射和最新结果 |
+| GET | `/operations/proposals/{id}/history` | 读取不可变审核事件 |
+| POST | `/operations/proposals/{id}/validate` | 事务试运行后回滚，保存校验结果 |
+| POST | `/operations/proposals/{id}/commit` | 重新校验并原子提交已校验提案 |
+| POST | `/operations/proposals/{id}/reject` | 记录原因并拒绝提案 |
+| GET | `/operations/impact?project_id=…&entity_id=…` | 查询潜在影响和解释路径 |
+| GET | `/operations/consistency?project_id=…` | 查询陈旧引用、冲突和链路缺口警告 |
+
+同一来源版本和原文的重复采集会返回原提案；变更原文需使用新的 `source_revision`。校验和提交使用提案自己的 `expected_version`，与实体内容版本分开。出现新来源快照或并发知识修订时，旧提案不会自动重放到新基线，需要重新采集或创建新修订提案。详细请求示例和规则见[第二阶段说明](docs/phase2-design.md)。
+
+## 核心概念
+
+接口和代码继续使用稳定的英文标识符，中文名称用于说明和阅读：
+
+| 实体标识符 | 中文名称 |
+|---|---|
+| Project | 项目 |
+| Domain | 业务领域 |
+| Requirement | 需求 |
+| BusinessRule | 业务规则 |
+| ArchitectureComponent | 架构组件 |
+| Interface | 接口契约 |
+| DataModel | 数据模型 |
+| CodeArtifact | 代码资产 |
+| TestCase | 测试用例 |
+| Decision | 工程决策 |
+| Constraint | 工程约束 |
+| Evidence | 证据 |
+
+关系包括包含（`CONTAINS`）、派生自（`DERIVED_FROM`）、依赖（`DEPENDS_ON`）、由其实现（`IMPLEMENTED_BY`）、由其验证（`VERIFIED_BY`）、受其约束（`CONSTRAINED_BY`）、影响（`IMPACTS`）、替代（`SUPERSEDES`）和冲突（`CONFLICTS_WITH`）。具体方向和校验规则见设计说明。
 
 ## API
 
-| Method | Route | Behavior |
+| 方法 | 路由 | 行为 |
 |---|---|---|
-| GET | `/metamodel` | Attribute JSON Schemas, relationship matrix, extra rules |
-| POST | `/entities` | Create Project or project-scoped entity at revision 1 |
-| GET | `/entities?project_id=…` | Filter latest revisions by `kind`, `status`, `q` |
-| GET | `/entities/{id}?version=…` | Latest or exact immutable revision |
-| PUT | `/entities/{id}` | Full replacement revision with `expected_version` |
-| GET | `/entities/{id}/history` | Immutable revisions, newest first |
-| POST | `/relationships` | Create link with exact source/target versions |
-| GET | `/relationships?project_id=…` | Filter by `entity_id`, `direction`, `type`, `status` |
-| GET/PUT | `/relationships/{id}` | Read latest/exact revision or append revision |
-| GET | `/relationships/{id}/history` | Relationship revision history |
+| GET | `/metamodel` | 返回属性 JSON Schema、关系矩阵、附加规则与 `labels` 中文名称对照 |
+| POST | `/entities` | 创建项目或项目范围内的实体，初始修订版本为 1 |
+| GET | `/entities?project_id=…` | 按 `kind`、`status`、`q` 筛选最新修订 |
+| GET | `/entities/{id}?version=…` | 读取最新修订或指定的不可变修订 |
+| PUT | `/entities/{id}` | 携带 `expected_version`，以完整内容创建新修订 |
+| GET | `/entities/{id}/history` | 按版本从新到旧读取不可变修订历史 |
+| POST | `/relationships` | 创建关系，指定源实体和目标实体的精确版本 |
+| GET | `/relationships?project_id=…` | 按 `entity_id`、`direction`、`type`、`status` 筛选 |
+| GET/PUT | `/relationships/{id}` | 读取最新／指定修订，或追加新修订 |
+| GET | `/relationships/{id}/history` | 读取关系修订历史 |
 
-List/history endpoints support `limit` (1–200, default 50) and `offset` (default 0).
-Status filters are explicit; lists include all lifecycle states by default. Search
-is case-insensitive literal substring search over name and description, not vector
-search. `direction` is `both`, `outbound`, or `inbound` and applies to `entity_id`.
+列表和历史接口支持 `limit`（1～200，默认 50）与 `offset`（默认 0）。状态筛选需显式指定；默认列表包含所有生命周期状态。搜索对名称和描述进行不区分大小写的字面子串匹配，不提供向量检索。`direction` 作用于 `entity_id`，可选 `both`（双向）、`outbound`（出向）或 `inbound`（入向）。
 
-Start with a Project (`project_id` omitted):
+先创建项目（省略 `project_id`）：
 
 ```json
 {
   "kind": "Project",
-  "name": "Example project",
+  "name": "示例项目",
   "status": "active",
   "provenance": {
-    "actor": "local-author",
+    "actor": "本地作者",
     "source_uri": "urn:example:planning",
     "source_revision": "meeting-001",
-    "change_reason": "Establish the project knowledge boundary",
+    "change_reason": "建立项目知识边界",
     "nature": "human_confirmed"
   }
 }
 ```
 
-Use its returned `id` as `project_id` for subsequent entities. Entity attributes
-are typed per kind; `/metamodel` exposes their schemas. No business-specific fields
-are mandatory except the Evidence contract. Optional attributes include acceptance
-criteria, rule expressions, interface contracts, data schema, code locators,
-test steps, decision rationale, and constraint expressions. Add domain-specific
-JSON in `attributes.extensions`; unknown core fields are rejected.
+将返回的 `id` 作为后续实体的 `project_id`。不同实体类型具有各自的属性模型，结构可通过 `/metamodel` 查看。除证据类型的必填约定外，不强制要求特定业务字段。可选属性包括验收条件、规则表达式、接口契约、数据结构、代码位置、测试步骤、决策依据和约束表达式。领域专有 JSON 可放入 `attributes.extensions`；未定义的核心字段会被拒绝。
 
-Every write requires provenance. `nature` is `fact`, `human_confirmed`, `inference`,
-or `assumption` (default); optional confidence is bounded 0–1. URI strings are
-locators only and are never fetched. A changed title/path never changes an ID.
-PUT replaces the complete mutable content; omitted optional values reset to their
-defaults. Identity/kind/project and relationship endpoints/type cannot be changed.
+每次写入都必须提供来源信息。`nature` 可选 `fact`（事实）、`human_confirmed`（人工确认）、`inference`（推断）或 `assumption`（假设，默认值）；可选置信度范围为 0～1。URI 仅作定位信息，不会被自动访问。名称或路径变更不会改变 ID。PUT 会替换完整的可变内容，省略的可选值会恢复默认值。实体的身份、类型、所属项目，以及关系的端点和类型均不可修改。
 
-Evidence is an entity with `category`, absolute `uri`, and external `revision`;
-optional SHA-256 identifies bytes. Code and test-execution evidence must identify
-`subject_id` and `subject_version`; test evidence must include an outcome.
-Entity/relationship `evidence` lists pin `{ "id": "<Evidence UUID>", "version": 1 }`.
+证据是一类实体，包含 `category`、绝对 `uri` 和外部 `revision`，可选 SHA-256 用于标识内容字节。代码和测试执行证据必须指定 `subject_id`、`subject_version`；测试证据还必须给出执行结果。实体或关系通过 `evidence` 列表固定引用证据版本，例如 `{ "id": "<Evidence UUID>", "version": 1 }`。
 
-Errors: 422 for invalid schema/semantics, 404 for missing identity/revision, 409
-for stale writes, duplicates, cycles, or invalid lifecycle transitions; 503 if the
-database cannot be reached. Archive/retire instead of deleting.
+错误状态码：结构或语义无效为 422；身份或修订不存在为 404；过期写入、重复关系、成环或无效生命周期转换为 409；数据库不可达为 503。删除需求通过归档实体或退役关系处理，不提供物理删除接口。
 
-## Verify
+应用自有的提示、字段说明和常见校验错误使用中文，字段名、路由、错误类型和枚举值保留稳定的英文标识。第三方交互文档界面的部分按钮、未知的底层错误以及已执行迁移中的原有提示可能仍为英文。后续内容遵循[项目语言与协作约定](CONTRIBUTING.md)。
+
+## 验证
 
 ```powershell
 $env:TEST_DATABASE_URL = $env:DATABASE_URL
 python -m pytest -q
 ```
 
-Integration tests use real PostgreSQL, create a randomly named isolated schema,
-and drop only that schema afterward. Use a disposable development database and a
-role permitted to create schemas. Without `TEST_DATABASE_URL`, integration tests
-are explicitly skipped and only pure model/semantic tests run.
+集成测试连接真实 PostgreSQL，创建随机命名的隔离数据库模式（schema），结束后仅删除该模式。请使用可丢弃的开发数据库，以及具备创建模式权限的角色。未设置 `TEST_DATABASE_URL` 时，集成测试会明确跳过，仅运行不依赖数据库的模型和语义测试。
 
-Coverage includes all entity/relationship kinds, provenance and typed attributes,
-revision/evidence pinning, optimistic concurrency, history, project boundaries,
-cycle prevention (including concurrent edges), verification evidence, rollback,
-immutable database records, migration replay, and API search/filtering.
+测试覆盖全部实体和关系类型、来源与类型化属性、修订及证据版本固定引用、乐观并发控制、历史记录、项目边界、防环校验（含并发建边）、验证证据、事务回滚、数据库记录不可变性、迁移重放，以及 API 搜索和筛选。
 
-See [design and policy decisions](docs/phase1-design.md) for relationship directions,
-lifecycle rules, assumptions, extension points, and decisions for project owners.
+[第一阶段设计与策略说明](docs/phase1-design.md)记录关系方向、生命周期规则和元模型扩展方式；[第二阶段设计与使用说明](docs/phase2-design.md)记录知识采集与提案闭环、分析规则、边界和待负责人确认的决策；[验证记录](docs/verification.md)列出已完成检查及环境限制。

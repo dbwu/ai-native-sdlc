@@ -1,0 +1,34 @@
+# 订单取消知识来源（合成示例）
+
+本文件用于演示第二阶段的 Markdown 采集，不代表真实业务要求。
+解析器只读取下方明确标记的结构化代码块，正文不会被自动解释为知识。
+
+```knowledge-json
+{
+  "entities": [
+    {
+      "key": "REQ-001",
+      "kind": "Requirement",
+      "name": "支持订单取消（合成示例）",
+      "description": "用于演示第二阶段采集和提案流程，不代表真实产品要求。",
+      "attributes": {
+        "acceptance_criteria": ["未支付订单可以取消"]
+      }
+    },
+    {
+      "key": "BR-001",
+      "kind": "BusinessRule",
+      "name": "支付前允许取消（合成示例）",
+      "description": "用于演示通过显式关系保留需求依据。"
+    }
+  ],
+  "relationships": [
+    {
+      "type": "DERIVED_FROM",
+      "source_key": "REQ-001",
+      "target_key": "BR-001",
+      "rationale": "示例需求依据该合成业务规则提出"
+    }
+  ]
+}
+```

@@ -1,160 +1,88 @@
-# Phase 1 design and decisions
+# 第一阶段设计与决策
 
-## Scope and structure
+## 实现范围与结构
 
-This implements the Engineering Knowledge Model described in the referenced
-“AI原生SDLC知识驱动” conversation: a unified knowledge metamodel and query/write
-API, before ingestion, inference, impact analysis, Agents, and orchestration.
+本实现对应“AI原生SDLC知识驱动”对话中的工程知识模型（Engineering Knowledge Model）：建立统一知识元模型和查询／写入 API。知识采集、推断、影响分析、Agent 及编排留待后续阶段。
 
-- `knowledge/models.py`: typed API inputs, kind-specific attributes, provenance.
-- `knowledge/semantics.py`: metamodel v1 relationship and lifecycle policy.
-- `knowledge/service.py`: PostgreSQL transaction service; HTTP is a thin adapter,
-  not the owner of semantics.
-- `knowledge/migrations/`: ordered, checksummed SQL migrations packaged with the app.
-- `knowledge/api.py`: REST, OpenAPI docs, bounded queries, validation errors.
+- `knowledge/models.py`：类型化接口输入、各实体类型的专有属性、来源信息。
+- `knowledge/semantics.py`：元模型 v1 的关系语义和生命周期策略。
+- `knowledge/service.py`：PostgreSQL 事务服务；HTTP 层仅作适配，语义规则由服务层统一管理。
+- `knowledge/migrations/`：按顺序执行、带校验和、随应用打包的 SQL 迁移。
+- `knowledge/api.py`：REST API、OpenAPI 文档、有限分页查询和校验错误处理。
 
-PostgreSQL stores a graph as relational identities and append-only revisions.
-Common revision content and typed attributes use JSONB; identity, scope, versions,
-endpoints, lifecycle state, timestamps, and evidence references are structured.
-This avoids twelve nearly identical persistence implementations while preserving
-typed domain attributes in the service. No independent graph/vector database,
-object storage, external source connector, or event infrastructure is needed here.
+PostgreSQL 通过实体身份表和只追加修订表保存知识图谱。通用修订内容与类型化属性使用 JSONB；身份、范围、版本、关系端点、生命周期状态、时间戳和证据引用使用结构化字段。这避免了为 12 种实体重复实现相近的持久化逻辑，同时在服务层保留领域属性的类型校验。本阶段不引入独立图数据库、向量数据库、对象存储、外部来源连接器或事件基础设施。
 
-## Identity, revisions, and provenance
+## 身份、修订与来源追踪
 
-Server-generated UUIDv4 IDs are globally unique and independent of names/paths.
-A Project scopes itself (`project_id = id`); every other entity belongs to exactly
-one existing Project. Cross-project relationships and evidence are rejected.
+ID 由服务端生成，采用全局唯一的 UUIDv4，与名称和路径无关。项目（Project）以自身为范围根（`project_id = id`）；其他实体必须且只能归属于一个已存在项目。禁止跨项目关系和证据引用。
 
-Entity and relationship IDs are immutable. Integer content revisions start at 1;
-all changes, including lifecycle changes, append a full snapshot. Evidence links
-and endpoint applicability reference exact revisions. Database triggers reject
-UPDATE/DELETE on knowledge tables. `recorded_at` is server time; `created_at` is
-identity creation time. Metamodel version 1 is stored separately from content
-versions; schema migrations have their own names/checksums. There is no global
-point-in-time graph snapshot or backdated validity interval in this MVP.
+实体和关系 ID 不可变。内容修订采用从 1 开始的整数版本；包括生命周期变更在内的所有修改都会追加完整快照。证据引用和关系端点的适用范围固定到精确修订。数据库触发器拒绝对知识表执行 UPDATE／DELETE。`recorded_at` 是服务端记录时间，`created_at` 是身份创建时间。元模型版本 1 与内容修订版本分别存储；数据库结构迁移具有独立的名称和校验和。本 MVP 不提供全局时点图谱快照，也不提供可回溯设置的有效时间区间。
 
-Provenance records actor, absolute source locator, external source revision, change
-reason, nature, and optional confidence on every revision. These are **caller
-assertions**, not independently authenticated claims. Evidence payloads point at
-external artifacts; original bytes remain in their authoritative source system.
-No link or URI is executed/fetched. Optional digests are recorded, not verified.
+每个修订都记录操作者、绝对来源 URI、外部来源版本、变更原因、知识性质及可选置信度。这些是**调用方声明的信息**，尚未经独立身份认证或事实核验。证据内容指向外部产物，原始字节仍以其权威来源系统为准。系统不会执行或访问链接／URI；可选内容摘要仅被记录，不会自动校验。
 
-Project-level transaction advisory locks protect read/validate/write sequences,
-including cycle checks and revision assignment. `expected_version` detects stale
-updates (409). Writes within a project serialize; projects can write independently.
-This favors correctness over throughput for the MVP. Callers may retry after a
-conflict only after reading and reconciling current content.
+项目级事务咨询锁（advisory lock）保护“读取—校验—写入”过程，包括成环检测和修订版本分配。`expected_version` 用于检测基于旧版本的更新，并返回 409。同一项目内的写入串行执行，不同项目可独立写入。本 MVP 优先保证正确性；遇到冲突后，调用方应先读取并协调当前内容，再决定是否重试。
 
-## Relationship semantics (v1 defaults)
+## 关系语义（v1 默认策略）
 
-Canonical storage uses the direction shown below. All relations prohibit self
-links; cardinality is many-to-many. Only one stable relationship identity exists
-per `(source_id, type, target_id)`, including retired/rejected identities. Revise
-that identity instead of creating a duplicate. There is no separate uniqueness
-policy on external project keys, names, or aliases.
+关系按下表方向规范化存储。全部关系禁止自关联，基数为多对多。每组 `(source_id, type, target_id)` 只对应一个稳定关系身份，包括已拒绝或已退役的关系。应修订既有关系，而不是创建重复身份。本阶段不额外要求外部项目键、名称或别名唯一。
 
-“Engineering” means all kinds except Project/Evidence; “technical” means
-ArchitectureComponent, Interface, DataModel, CodeArtifact, TestCase.
+下表中，“工程实体”指除 Project／Evidence 外的全部类型；“技术实体”指 ArchitectureComponent、Interface、DataModel、CodeArtifact、TestCase。实体中文名称对照见[使用说明](../README.md)。
 
-| Type | Source → target | Additional validation |
+| 关系类型 | 源 → 目标 | 附加校验 |
 |---|---|---|
-| CONTAINS | Project/Domain → any non-Project; ArchitectureComponent → technical | No cycles across live edges |
-| DERIVED_FROM | Engineering → any non-Project | Rationale required, including derivation basis |
-| DEPENDS_ON | Engineering → Engineering | Cycles allowed; mutual dependencies may be legitimate |
-| IMPLEMENTED_BY | Requirement/BusinessRule/ArchitectureComponent/Interface/DataModel → ArchitectureComponent/CodeArtifact | Verified link needs matching code evidence |
-| VERIFIED_BY | Engineering except TestCase → TestCase | Verified link needs matching **passed** execution evidence |
-| CONSTRAINED_BY | Engineering → Constraint/BusinessRule/Decision | Does not evaluate expressions |
-| IMPACTS | Engineering → Engineering | Explicitly asserted impact; no computed impact analysis |
-| SUPERSEDES | Non-Project → same kind | New entity replaces old entity; no cycles |
-| CONFLICTS_WITH | Engineering ↔ Engineering | Symmetric: lower UUID stored as source, paired versions swapped accordingly |
+| CONTAINS（包含） | Project／Domain → 任意非 Project 实体；ArchitectureComponent → 技术实体 | 待确认和已验证的关系不得成环 |
+| DERIVED_FROM（派生自） | 工程实体 → 任意非 Project 实体 | 必须给出说明，记录推导依据 |
+| DEPENDS_ON（依赖） | 工程实体 → 工程实体 | 允许循环，互相依赖可能合理 |
+| IMPLEMENTED_BY（由其实现） | Requirement／BusinessRule／ArchitectureComponent／Interface／DataModel → ArchitectureComponent／CodeArtifact | 已验证关系需要匹配的代码证据 |
+| VERIFIED_BY（由其验证） | 除 TestCase 外的工程实体 → TestCase | 已验证关系需要匹配且结果为**通过**的执行证据 |
+| CONSTRAINED_BY（受其约束） | 工程实体 → Constraint／BusinessRule／Decision | 不执行约束表达式 |
+| IMPACTS（影响） | 工程实体 → 工程实体 | 显式声明的影响，不执行自动影响分析 |
+| SUPERSEDES（替代） | 非 Project 实体 → 同类型实体 | 新实体替代旧实体，不得成环 |
+| CONFLICTS_WITH（冲突） | 工程实体 ↔ 工程实体 | 对称关系：将较小 UUID 存为源，相应交换端点版本 |
 
-Containment/replacement cycle checks include proposed and verified edges; rejected
-and retired edges are excluded. Reactivation rechecks the graph. A replacement
-link does not automatically deprecate the replaced entity. Multiple containers
-and multiple implementations are permitted. Rationale is required for every link.
+包含／替代关系的成环检测覆盖 `proposed`（待确认）与 `verified`（已验证）关系，排除 `rejected`（已拒绝）与 `retired`（已退役）关系。重新启用关系时会再次检查图谱。替代关系不会自动将旧实体标记为弃用。允许多个容器和多个实现。所有关系均必须提供理由或依据。
 
-Every **verified** link requires fact/human-confirmed provenance and at least one
-active, fact/human-confirmed Evidence revision. `IMPLEMENTED_BY` additionally
-requires Evidence category `code` whose subject is the exact target ID/version;
-`VERIFIED_BY` requires category `test_execution`, same subject pin, outcome
-`passed`. Code evidence subjects are CodeArtifact/ArchitectureComponent; execution
-evidence subjects are TestCase. Proposed links may carry no evidence. These rules
-establish traceability, not independent proof of artifact truth or test coverage.
+每条**已验证**关系都要求其来源性质为 `fact`（事实）或 `human_confirmed`（人工确认），并至少引用一个状态为 `active`（生效）、来源性质同样为事实或人工确认的证据修订。`IMPLEMENTED_BY` 还要求证据分类为 `code`，证据对象必须与目标端点的 ID／版本精确匹配；`VERIFIED_BY` 要求分类为 `test_execution`，对象精确匹配，且结果为 `passed`。代码证据的对象必须是 CodeArtifact／ArchitectureComponent，执行证据的对象必须是 TestCase。待确认关系可以暂不携带证据。这些规则建立可追溯性，不代表系统已独立证明外部产物真实性或测试覆盖情况。
 
-Live links cannot pin an archived endpoint revision. Later endpoint/evidence
-changes do not rewrite or automatically invalidate earlier links: a verified link
-still applies only to its recorded endpoint/evidence versions. Queries return
-these explicit pins, never imply verification of a newer entity revision. Detecting
-stale evidence and revalidating links belongs to later knowledge operations.
+待确认和已验证关系不能引用状态为已归档的端点修订。之后对端点或证据的修改，不会改写或自动使旧关系失效：已验证关系仍只适用于其记录的端点版本和证据版本。查询会返回这些明确的版本引用，不表示较新实体修订也已验证。过期证据识别和关系重新验证属于后续知识操作阶段。
 
-## Lifecycle defaults
+## 生命周期默认策略
 
-Entities:
+实体状态：`draft`（草稿）、`active`（生效）、`deprecated`（已弃用）、`archived`（已归档）。
 
 ```text
 draft → active | archived
 active → deprecated | archived
 deprecated → active | archived
-archived → terminal
+archived → 终态
 ```
 
-Relationships:
+关系状态：`proposed`（待确认）、`verified`（已验证）、`rejected`（已拒绝）、`retired`（已退役）。
 
 ```text
 proposed → verified | rejected | retired
 verified → proposed | retired
 rejected → proposed | retired
-retired → terminal
+retired → 终态
 ```
 
-Same-state content updates are allowed except terminal states. Verified updates
-revalidate all evidence; to remove evidence or move to unsupported endpoint versions,
-submit the revised content with status `proposed`. New entities may start in
-any entity state, and new relationships in any relationship state, provided all
-applicable rules pass. Creating a verified link does not require a prior proposal
-revision; no approval workflow is implied.
+除终态外，允许状态不变的内容修订。更新已验证关系时会重新校验全部证据；如果需要移除证据，或改为证据尚不支持的端点版本，应将修订内容以 `proposed` 状态提交。新实体和新关系可以直接使用各自任意状态，但仍必须通过全部适用校验。创建已验证关系不强制要求先保存待确认修订，本阶段也未引入审批流程。
 
-Archiving a Project freezes new writes throughout its scope while preserving
-reads/history. Archived entities and retired links remain available historically;
-there is no hard delete API or automatic propagation to related objects.
+归档项目会冻结其范围内的全部新增写入，但保留读取和历史记录。已归档实体与已退役关系仍可追溯；不提供物理删除接口，也不自动向关联对象传播状态变化。
 
-## Assumptions and decisions for the project owner
+## 实现假设与待负责人确认的决策
 
-These are reversible implementation defaults, not claims about your organization:
+以下是可调整的实现默认值，不代表已确定贵组织的业务要求：
 
-1. **Stack:** Python/FastAPI/Pydantic + psycopg + PostgreSQL, because the folder has
-   no established application stack. No source repositories are inferred or imported.
-2. **Semantics:** The matrix above, same-project scoping, lifecycle vocabulary,
-   many-to-many containment, and evidence thresholds are initial metamodel policy.
-   Review them before real engineering knowledge is imported. No product-specific
-   rule or acceptance criterion is invented; the demo is clearly synthetic.
-3. **Approval/authentication — owner decision required before shared use:** who may
-   confirm knowledge or verify links, trusted source identities, and project access
-   control are unspecified. The MVP runs locally without authentication; an `actor`
-   value is attribution only. No approval authority has been invented.
-4. **Governance — owner decision required before production data:** retention,
-   personal/confidential data handling, project tenancy, identifier interoperability,
-   deployment/backup policy, and artifact storage authority remain open. No external
-   writes, deployment, or integration configuration has been performed.
+1. **技术栈：** 使用 Python／FastAPI／Pydantic、psycopg 和 PostgreSQL，因为初始目录没有既有应用技术栈。没有推定或导入任何业务源代码仓库。
+2. **语义策略：** 上述矩阵、项目内边界、生命周期词汇、多对多包含关系及证据门槛，均为元模型初始策略。导入真实工程知识前应进行评审。没有编造特定产品的业务规则或验收条件；演示数据明确为虚构内容。
+3. **审批与认证——共享使用前需负责人决策：** 谁有权确认知识或验证关系、哪些来源身份可信，以及项目访问控制，目前均未定义。MVP 在本地运行，不提供身份认证；`actor` 仅作来源署名，不能证明身份。实现未擅自指定审批权限。
+4. **治理——使用生产数据前需负责人决策：** 数据保留期限、个人／机密数据处理、项目租户隔离、标识符互通、部署／备份策略、产物存储权威来源，仍待确定。目前没有向外部系统写入数据、执行部署或配置集成。
 
-Semantic validation must go through the service. Foreign keys, uniqueness, endpoint
-revision pins, scope consistency for links, and append-only records are enforced
-by PostgreSQL too; the database does not duplicate the full Python type/evidence
-policy. A direct SQL writer can bypass application semantics. For shared deployment,
-use separate migration/service roles and prohibit other writers; authentication and
-authorization need an explicit owner-approved design first.
+所有语义校验都必须通过服务层。PostgreSQL 同时约束外键、唯一性、端点版本引用、关系范围一致性及只追加记录，但不重复实现完整的 Python 类型／证据策略。直接写 SQL 可以绕过应用语义。共享部署应分离迁移角色与服务角色，并禁止其他直接写入方；身份认证和授权需要先形成经负责人明确批准的设计。
 
-## Extension and migration path
+## 扩展与迁移方式
 
-Use `attributes.extensions` for experimental domain fields. Promote stable fields
-into a kind's Pydantic model with compatibility tests. Add new kinds/relations by
-updating the schema via a **new** SQL migration, model registry, policy, metamodel
-version strategy, tests, and documentation together. Never modify an applied SQL
-migration: checksums detect drift. Existing revision snapshots must retain their
-meaning; a future incompatible metamodel needs explicit readers/migration policy.
-Current history is enough for audit of content, not a general event bus.
+实验性领域字段放入 `attributes.extensions`。字段稳定后，可纳入对应实体类型的 Pydantic 模型，并补充兼容性测试。新增实体或关系类型时，应通过**新的** SQL 迁移同步更新数据库结构、模型注册表、语义策略、元模型版本策略、测试和文档。禁止修改已执行迁移的 SQL；校验和会检测迁移内容漂移。历史修订快照的含义必须保持稳定；未来不兼容的元模型变更，需要明确的读取兼容与迁移策略。当前历史记录支持内容审计，不充当通用事件总线。
 
-The intentionally deferred phases include source ingestion/extraction, proposals
-with approval routing, automated consistency checks, computed impact analysis,
-vector search, context packages, source-code analysis, Agents, and orchestration.
+明确推迟到后续阶段的能力包括：来源采集／抽取、带审批路由的变更提案、自动一致性检查、计算式影响分析、向量检索、上下文包、源代码分析、Agent 和编排。

@@ -1,4 +1,4 @@
-"""Metamodel v1 policy. No organization-specific approval workflow."""
+"""元模型第 1 版的语义策略，不包含组织特定的审批流程。"""
 from .models import EntityStatus, Kind as K, RelationStatus, RelationType as R
 
 
@@ -28,11 +28,11 @@ RULES = {
 def validate_types(relation_type: R, source: K, target: K):
     sources, targets = RULES[relation_type]
     if source not in sources or target not in targets:
-        raise KnowledgeError(f"{relation_type}: {source} -> {target} is not permitted")
+        raise KnowledgeError(f"关系 {relation_type} 不允许从 {source} 指向 {target}")
     if relation_type == R.CONTAINS and source == K.COMPONENT and target not in TECHNICAL:
-        raise KnowledgeError("ArchitectureComponent may contain only technical entities")
+        raise KnowledgeError("架构组件 ArchitectureComponent 只能包含技术类实体")
     if relation_type == R.SUPERSEDES and source != target:
-        raise KnowledgeError("SUPERSEDES requires entities of the same kind")
+        raise KnowledgeError("替代关系 SUPERSEDES 的两个实体必须属于同一类型")
 
 
 ENTITY_TRANSITIONS = {
@@ -51,6 +51,6 @@ RELATION_TRANSITIONS = {
 
 def validate_transition(old, new, transitions):
     if not transitions[old]:
-        raise KnowledgeError(f"{old} revisions are terminal", 409)
+        raise KnowledgeError(f"{old} 是终止状态，不能再提交修订", 409)
     if new != old and new not in transitions[old]:
-        raise KnowledgeError(f"invalid lifecycle transition: {old} -> {new}", 409)
+        raise KnowledgeError(f"不允许的生命周期状态迁移：{old} → {new}", 409)

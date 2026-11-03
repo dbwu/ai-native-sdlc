@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "engineering-knowledge"
-version = "0.1.0"
-description = "Phase 1 Engineering Knowledge Model"
+version = "0.2.0"
+description = "工程知识平台：知识模型与知识操作"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115,<1",
@@ -25,4 +25,4 @@ knowledge = ["migrations/*.sql"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["integration: requires TEST_DATABASE_URL pointing to a disposable PostgreSQL database"]
+markers = ["integration: 需要将 TEST_DATABASE_URL 指向可用于测试的临时 PostgreSQL 数据库"]
