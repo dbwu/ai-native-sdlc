@@ -17,6 +17,7 @@ from .runtime_models import TaskControl, TaskCreate
 from .semantics import KnowledgeError
 from .service import KnowledgeService
 from .workflow_models import ReferenceExecutionRequest, STAGES, WorkflowControl, WorkflowCreate
+from .generic_workflow import create_generic, stage_for, quality_generic
 
 
 def _digest(content):
@@ -66,6 +67,8 @@ class WorkflowService:
                     "rationale": "流程模板中的待确认追溯关系，需在阶段门禁中复核。"} for kind, source, target in relations]}
 
     def create(self, request: WorkflowCreate):
+        if request.scenario == 'generic_v1':
+            return create_generic(self, request)
         with self._transaction() as conn:
             KnowledgeService._lock(conn, request.project_id)
             KnowledgeService._assert_project(conn, request.project_id)
@@ -106,7 +109,7 @@ class WorkflowService:
 
     def _new_task(self, conn, workflow, state, actor):
         records = self._records(conn, state)
-        stage = STAGES[state["stage"]]
+        stage = stage_for(workflow, state)
         dependencies = [UUID(state["completed_stages"][-1]["task_id"])] if state["completed_stages"] else []
         refs = [{"id": str(item["id"]), "version": item["version"]} for item in records.values()]
         for ref in workflow["definition"]["input_knowledge"]:
@@ -124,7 +127,7 @@ class WorkflowService:
                      (workflow["id"], workflow["project_id"], state["stage"], state["stage_attempt"], task["id"]))
 
     def _quality(self, conn, workflow, state, task):
-        stage = STAGES[state["stage"]]
+        stage = stage_for(workflow, state)
         if not task["runtime"]["proposal_id"]:
             raise KnowledgeError("阶段缺少已提交的知识产物提案")
         proposal = KnowledgeOperations._proposal(conn, UUID(task["runtime"]["proposal_id"]))
@@ -142,6 +145,9 @@ class WorkflowService:
         artifacts = task["runtime"]["result"]["artifacts"]
         if artifacts.get("stage") != stage["key"] or artifacts.get("scenario") != workflow["definition"]["scenario"]:
             raise KnowledgeError("阶段报告缺少匹配的阶段与参考场景标识")
+        if workflow['definition']['scenario'] == 'generic_v1':
+            quality_generic(self, conn, workflow, state, records)
+            return records, baselines
         build = build_reference(workflow["definition"]["scenario"])
         if state["stage"] == 0:
             if not records["requirement"]["attributes"]["acceptance_criteria"]:
@@ -191,7 +197,7 @@ class WorkflowService:
 
     def _gate(self, conn, workflow, state, task, request):
         records, baselines = self._quality(conn, workflow, state, task)
-        stage = STAGES[state["stage"]]
+        stage = stage_for(workflow, state)
         promoted = set(stage["outputs"])
         versions = {key: item["version"] + int(key in promoted) for key, item in records.items()}
         provenance = {"actor": request.actor, "source_uri": "urn:workflow:" + str(workflow["id"]) + ":gate",
@@ -212,7 +218,10 @@ class WorkflowService:
             source_key, target_key = by_id[str(relation["source_id"])], by_id[str(relation["target_id"])]
             data = {field: deepcopy(relation[field]) for field in ("source_version", "target_version", "status", "rationale", "evidence")}
             data.update(expected_version=relation["version"], source_version=versions[source_key], target_version=versions[target_key], provenance=provenance)
-            if state["stage"] == 3 and relation["type"] in {"IMPLEMENTED_BY", "VERIFIED_BY"}:
+            if workflow['definition']['scenario']=='generic_v1' and (data['source_version']!=relation['source_version'] or data['target_version']!=relation['target_version']):
+                data.update(status='proposed',evidence=[])
+            selected = workflow['definition']['scenario']!='generic_v1' or (source_key.split(':')[0]=='requirement' and target_key in ('code','test'))
+            if state["stage"] == 3 and relation["type"] in {"IMPLEMENTED_BY", "VERIFIED_BY"} and selected:
                 evidence_key = "code-evidence" if relation["type"] == "IMPLEMENTED_BY" else "test-evidence"
                 data.update(status="verified", evidence=[{"id": str(records[evidence_key]["id"]), "version": versions[evidence_key]}])
             if (data["source_version"] != relation["source_version"] or data["target_version"] != relation["target_version"]
@@ -269,7 +278,7 @@ class WorkflowService:
                 if proposal["status"] != "committed":
                     raise KnowledgeError("请先明确审阅并提交初始化知识提案", 409)
                 baselines = [{"table": table, "id": record_id, "version": version} for (table, record_id), version in self._versions(proposal["result"]["operations"]).items()]
-                state["knowledge_versions"] = self._assert_versions(conn, baselines)
+                state["knowledge_versions"] = self._assert_versions(conn, proposal['plan'].get('baselines', []) + baselines, self._versions(proposal['result']['operations']))
                 self._new_task(conn, workflow, state, request.actor)
                 status = "RUNNING"
             elif action == "pause":

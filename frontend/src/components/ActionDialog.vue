@@ -6,7 +6,7 @@ const dialog=ref<HTMLDialogElement>(), error=ref(''), form=reactive({actor:'',re
 const confirm=computed(()=>['commit_proposal','advance','cancel','reject_proposal','reject_task_and_retry'].includes(state.actionId))
 const title=computed(()=>action(state.actionId)?.label || actionNames[state.actionId] || '确认操作')
 const confirmText=computed(()=>state.actionId==='cancel'?'我确认取消流程，已提交知识与历史记录会保留。':state.actionId.includes('reject')?'我确认拒绝这次变更，旧提案与任务记录会保留。':state.actionId==='advance'?'我已核对阶段门禁及其产物，确认放行。':'我已审阅本次变更内容及依据，确认提交。')
-watch(()=>state.actionId,async value=>{ await nextTick(); if(value){form.actor=state.actor;form.reason='';form.confirmed=false;error.value='';dialog.value?.showModal()}else dialog.value?.close() })
+watch(()=>state.actionId,async value=>{ await nextTick(); if(value!==state.actionId)return; if(value){form.actor=state.actor;form.reason='';form.confirmed=false;error.value='';if(!dialog.value?.open)dialog.value?.showModal()}else dialog.value?.close() })
 function close(event?:Event){if(state.busy){event?.preventDefault();return}state.actionId=''}
 async function submit(){if(state.busy || (confirm.value && !form.confirmed))return;error.value='';try{await runAction(form.actor.trim(),form.reason.trim())}catch(failure){error.value=(failure as Error).message}}
 </script>

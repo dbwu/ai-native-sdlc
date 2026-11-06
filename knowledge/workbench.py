@@ -16,6 +16,7 @@ from .semantics import KnowledgeError
 from .workflow import WorkflowService
 from .workflow_adapter import WorkflowReferenceAdapter
 from .workflow_models import ReferenceExecutionRequest, STAGES, WorkflowControl
+from .generic_workflow import report_generic
 
 
 class WorkbenchAction(RuntimeInput):
@@ -75,6 +76,8 @@ class WorkbenchService:
             ("resume", "恢复流程推进", ws == "PAUSED", "当前流程未暂停。"),
             ("cancel", "取消当前流程", ws not in {"COMPLETED", "CANCELLED"}, "已完成或取消的流程不能再次取消。"),
         ]
+        if workflow['definition']['scenario'] == 'generic_v1' and workflow['definition']['executor'] == 'manual':
+            rules = [(a,l,False if a=='run_reference_stage' else e,'当前为人工流程，请提交本阶段产物。' if a=='run_reference_stage' else r) for a,l,e,r in rules]
         project = KnowledgeService._get(conn, "entity", workflow["project_id"])
         result = []
         for action, label, enabled, reason in rules:
@@ -95,7 +98,8 @@ class WorkbenchService:
         artifacts, relationships = [], []
         for key, record_id in state["bindings"].items():
             try:
-                record = KnowledgeService._get(conn, "entity", UUID(record_id))
+                pinned = next((r['version'] for r in state['knowledge_versions'] if r['table']=='entity' and str(r['id'])==str(record_id)), None) if workflow['status']=='COMPLETED' else None
+                record = KnowledgeService._get(conn, "entity", UUID(record_id), pinned)
             except KnowledgeError as exc:
                 if exc.status_code != 404:
                     raise
@@ -103,7 +107,8 @@ class WorkbenchService:
             artifacts.append({"key": key, "entity": record})
         for record_id in state["relation_ids"]:
             try:
-                relationships.append(KnowledgeService._get(conn, "relationship", UUID(record_id)))
+                pinned = next((r['version'] for r in state['knowledge_versions'] if r['table']=='relationship' and str(r['id'])==str(record_id)), None) if workflow['status']=='COMPLETED' else None
+                relationships.append(KnowledgeService._get(conn, "relationship", UUID(record_id), pinned))
             except KnowledgeError as exc:
                 if exc.status_code != 404:
                     raise
@@ -111,7 +116,7 @@ class WorkbenchService:
         history = conn.execute("SELECT * FROM workflow_event WHERE workflow_id=%s ORDER BY version DESC LIMIT 200", (workflow_id,)).fetchall()
         return {"workflow": workflow, "task": task, "proposal": proposal, "proposal_kind": kind,
                 "artifacts": artifacts, "relationships": relationships, "executions": executions, "history": history,
-                "actions": self._actions(conn, workflow, task, proposal, kind), "mode": "reference"}
+                "actions": self._actions(conn, workflow, task, proposal, kind), "mode": "generic" if workflow['definition']['scenario']=='generic_v1' else 'reference'}
 
     def snapshot(self, workflow_id: UUID):
         with connect(self.database_url) as conn:
@@ -155,6 +160,9 @@ class WorkbenchService:
             capabilities=[stage["capability"]], read_kinds=list(Kind), write_kinds=WRITE_SCOPES[workflow["state"]["stage"]], actor=request.actor))
 
     def _run_reference(self, conn, workflow, request):
+        if workflow['definition']['scenario']=='generic_v1':
+            success=report_generic(WorkflowService(self.database_url,connection=conn),conn,workflow,request.actor,request.reason)
+            return '本阶段产物已形成，等待审阅和明确提交。' if success else '实际测试未通过，日志已保存，未生成通过证据。'
         agent = self._reference_agent(conn, workflow, request)
         runtime = AgentRuntime(self.database_url, connection=conn)
         lease = runtime.claim(ClaimRequest(agent_id=agent["id"], task_id=workflow["state"]["task_id"], lease_seconds=120))

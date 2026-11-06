@@ -20,6 +20,7 @@ from .models import (
     RelationContent, RelationCreate, RelationStatus, RelationType, RelationUpdate,
 )
 from .semantics import KnowledgeError, RULES
+from .platform_api import platform_router
 from .service import KnowledgeService
 from .operations_api import operations_router
 from .runtime_api import runtime_router
@@ -180,6 +181,7 @@ def create_app(url: str | None = None) -> FastAPI:
     app.include_router(runtime_router(lambda: url or database_url()))
     app.include_router(workflow_router(lambda: url or database_url()))
     app.include_router(workbench_router(lambda: url or database_url()))
+    app.include_router(platform_router(lambda: url or database_url()))
 
     @app.get("/", include_in_schema=False)
     def home():

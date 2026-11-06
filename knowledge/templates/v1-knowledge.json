@@ -1,0 +1,333 @@
+{
+  "entities": [
+    {
+      "key": "DOMAIN-COURSE",
+      "kind": "Domain",
+      "name": "选课业务领域",
+      "description": "教学用选课系统设计，使用预置学生身份，只处理单学期；账号、支付和退课不在本轮范围。",
+      "status": "draft",
+      "attributes": {
+        "glossary": {
+          "学生": "本教程预置的学生身份",
+          "课程": "教学内容定义",
+          "教学班": "本学期可选择的具体开课实例",
+          "选课记录": "某学生与某教学班的唯一关联"
+        }
+      }
+    },
+    {
+      "key": "REQ-ENROLL",
+      "kind": "Requirement",
+      "name": "基础选课与已选列表",
+      "description": "学生可以查询教学班目录、选择教学班并查看自己的已选列表；同一选课请求重复提交保持幂等。教学用选课系统设计，使用预置学生身份，只处理单学期；账号、支付和退课不在本轮范围。",
+      "status": "draft",
+      "attributes": {
+        "requirement_type": "functional",
+        "acceptance_criteria": [
+          "学生能查看当前学期教学班目录及课程名称、授课教师。",
+          "学生首次选择一个存在的教学班后，生成一条选课记录并出现在自己的已选列表。",
+          "同一学生重复选择同一教学班时返回原记录，不新增记录，不产生重复的业务写入。",
+          "不同学生的已选列表相互隔离。"
+        ]
+      }
+    },
+    {
+      "key": "BR-UNIQUE",
+      "kind": "BusinessRule",
+      "name": "同一学生同一教学班的选课保持唯一与幂等",
+      "description": "同一学生对同一教学班只能保留一条选课记录；重复请求返回已有结果。这是待实现的业务规则定义，表达式仅用于知识描述。",
+      "status": "draft",
+      "attributes": {
+        "expression": {
+          "unique_fields": [
+            "student_id",
+            "offering_id"
+          ],
+          "duplicate_request": "return_existing_enrollment",
+          "new_record_on_duplicate": false
+        }
+      }
+    },
+    {
+      "key": "COMP-ENROLL",
+      "kind": "ArchitectureComponent",
+      "name": "选课服务",
+      "description": "待实现的选课服务设计，负责基础选课与已选列表；本知识条目不代表已有业务服务。",
+      "status": "draft",
+      "attributes": {
+        "responsibility": "提供教学班目录、选课和已选列表；按学生隔离查询，以唯一约束和幂等处理防止重复选课。",
+        "extensions": {
+          "implementation_status": "planned",
+          "transaction_plan": [
+            "确认预置学生与教学班存在",
+            "查询当前学生对该教学班的已有选课记录，存在则返回原记录",
+            "创建选课记录；用学生与教学班联合唯一约束保护并发重复请求",
+            "返回选课结果"
+          ]
+        }
+      }
+    },
+    {
+      "key": "IF-ENROLL",
+      "kind": "Interface",
+      "name": "选课 HTTP 接口设计",
+      "description": "待实现的 HTTP 接口契约草案，覆盖目录、选课和已选列表；这些路径不是当前工程知识平台已经提供的业务接口。",
+      "status": "draft",
+      "attributes": {
+        "protocol": "http",
+        "extensions": {
+          "implementation_status": "planned",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/offerings",
+              "purpose": "查询当前学期的教学班目录",
+              "response": {
+                "status": 200,
+                "fields": [
+                  "offering_id",
+                  "course_name",
+                  "teacher"
+                ]
+              }
+            },
+            {
+              "method": "POST",
+              "path": "/offerings/{id}/enroll",
+              "purpose": "为预置的当前学生选择教学班；重复请求返回原选课记录",
+              "request_context": {
+                "student_id": "预置的当前学生标识"
+              },
+              "responses": [
+                {
+                  "status": 201,
+                  "meaning": "首次选课成功"
+                },
+                {
+                  "status": 200,
+                  "meaning": "重复请求返回已有选课记录，不新增记录"
+                }
+              ]
+            },
+            {
+              "method": "GET",
+              "path": "/me/enrollments",
+              "purpose": "查询预置当前学生的已选教学班列表",
+              "response": {
+                "status": 200,
+                "fields": [
+                  "enrollment_id",
+                  "offering_id",
+                  "course_name"
+                ]
+              },
+              "request_context": {
+                "student_id": "预置的当前学生标识"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "key": "DM-ENROLL",
+      "kind": "DataModel",
+      "name": "选课数据模型设计",
+      "description": "待实现的单学期数据模型，区分课程、教学班和选课记录，并定义学生与教学班的联合唯一约束。",
+      "status": "draft",
+      "attributes": {
+        "schema_definition": {
+          "purpose": "待实现的数据结构设计，尚未创建业务数据库表",
+          "tables": {
+            "Student": {
+              "fields": {
+                "student_id": "字符串，主键，教学示例预置身份"
+              }
+            },
+            "Course": {
+              "fields": {
+                "course_id": "字符串，主键",
+                "name": "课程名称"
+              }
+            },
+            "Offering": {
+              "fields": {
+                "offering_id": "字符串，主键",
+                "course_id": "关联 Course.course_id",
+                "teacher": "授课教师名称"
+              }
+            },
+            "Enrollment": {
+              "fields": {
+                "enrollment_id": "字符串，主键",
+                "student_id": "关联 Student.student_id",
+                "offering_id": "关联 Offering.offering_id"
+              },
+              "constraints": [
+                {
+                  "type": "unique",
+                  "fields": [
+                    "student_id",
+                    "offering_id"
+                  ],
+                  "purpose": "同一学生在同一教学班最多保留一条选课记录"
+                }
+              ]
+            }
+          }
+        },
+        "extensions": {
+          "implementation_status": "planned"
+        }
+      }
+    },
+    {
+      "key": "CODE-ENROLL",
+      "kind": "CodeArtifact",
+      "name": "选课服务待实现代码",
+      "description": "计划创建选课业务代码，承接已确认的需求与接口设计；当前没有源码、代码提交版本或执行证据。",
+      "status": "draft",
+      "attributes": {
+        "path": "src/enrollment_service.py",
+        "symbol": "enroll",
+        "language": "python",
+        "extensions": {
+          "implementation_status": "planned",
+          "planned_responsibilities": [
+            "查询教学班目录",
+            "按预置学生查询已选列表",
+            "首次选课创建记录",
+            "重复请求返回原记录并保持唯一约束"
+          ]
+        }
+      }
+    },
+    {
+      "key": "TEST-ENROLL",
+      "kind": "TestCase",
+      "name": "基础选课与幂等验收定义",
+      "description": "待实现、待执行的验收用例定义，不代表测试已经运行或通过。",
+      "status": "draft",
+      "attributes": {
+        "steps": [
+          "预置学生 S001、S002 以及教学班 O101、O102。",
+          "查询教学班目录，检查可以看到 O101、O102 及课程名称、教师。",
+          "S001 首次选择 O101，查询 S001 已选列表。",
+          "S001 再次选择 O101，比较两次返回的选课记录标识和记录数量。",
+          "查询 S002 已选列表，检查不会出现 S001 的选课记录。"
+        ],
+        "expected_result": "目录内容正确；S001 首次选课成功，重复请求返回同一记录且总记录数为一；S002 的已选列表保持独立。",
+        "extensions": {
+          "execution_status": "not_run"
+        }
+      }
+    }
+  ],
+  "relationships": [
+    {
+      "type": "CONTAINS",
+      "source_key": "DOMAIN-COURSE",
+      "target_key": "REQ-ENROLL",
+      "status": "proposed",
+      "rationale": "选课领域包含该需求、规则或服务设计。"
+    },
+    {
+      "type": "CONTAINS",
+      "source_key": "DOMAIN-COURSE",
+      "target_key": "BR-UNIQUE",
+      "status": "proposed",
+      "rationale": "选课领域包含该需求、规则或服务设计。"
+    },
+    {
+      "type": "CONTAINS",
+      "source_key": "DOMAIN-COURSE",
+      "target_key": "COMP-ENROLL",
+      "status": "proposed",
+      "rationale": "选课领域包含该需求、规则或服务设计。"
+    },
+    {
+      "type": "CONTAINS",
+      "source_key": "COMP-ENROLL",
+      "target_key": "IF-ENROLL",
+      "status": "proposed",
+      "rationale": "选课服务包含对应的接口、数据模型、计划代码或验收定义。"
+    },
+    {
+      "type": "CONTAINS",
+      "source_key": "COMP-ENROLL",
+      "target_key": "DM-ENROLL",
+      "status": "proposed",
+      "rationale": "选课服务包含对应的接口、数据模型、计划代码或验收定义。"
+    },
+    {
+      "type": "CONTAINS",
+      "source_key": "COMP-ENROLL",
+      "target_key": "CODE-ENROLL",
+      "status": "proposed",
+      "rationale": "选课服务包含对应的接口、数据模型、计划代码或验收定义。"
+    },
+    {
+      "type": "CONTAINS",
+      "source_key": "COMP-ENROLL",
+      "target_key": "TEST-ENROLL",
+      "status": "proposed",
+      "rationale": "选课服务包含对应的接口、数据模型、计划代码或验收定义。"
+    },
+    {
+      "type": "DEPENDS_ON",
+      "source_key": "COMP-ENROLL",
+      "target_key": "REQ-ENROLL",
+      "status": "proposed",
+      "rationale": "该技术产物依赖基础选课与幂等需求；需求变化时需要复核。"
+    },
+    {
+      "type": "DEPENDS_ON",
+      "source_key": "IF-ENROLL",
+      "target_key": "REQ-ENROLL",
+      "status": "proposed",
+      "rationale": "该技术产物依赖基础选课与幂等需求；需求变化时需要复核。"
+    },
+    {
+      "type": "DEPENDS_ON",
+      "source_key": "DM-ENROLL",
+      "target_key": "REQ-ENROLL",
+      "status": "proposed",
+      "rationale": "该技术产物依赖基础选课与幂等需求；需求变化时需要复核。"
+    },
+    {
+      "type": "DEPENDS_ON",
+      "source_key": "CODE-ENROLL",
+      "target_key": "REQ-ENROLL",
+      "status": "proposed",
+      "rationale": "该技术产物依赖基础选课与幂等需求；需求变化时需要复核。"
+    },
+    {
+      "type": "DEPENDS_ON",
+      "source_key": "TEST-ENROLL",
+      "target_key": "REQ-ENROLL",
+      "status": "proposed",
+      "rationale": "该技术产物依赖基础选课与幂等需求；需求变化时需要复核。"
+    },
+    {
+      "type": "DERIVED_FROM",
+      "source_key": "REQ-ENROLL",
+      "target_key": "BR-UNIQUE",
+      "status": "proposed",
+      "rationale": "基础选课的幂等验收条件依据唯一与幂等业务规则。"
+    },
+    {
+      "type": "IMPLEMENTED_BY",
+      "source_key": "REQ-ENROLL",
+      "target_key": "CODE-ENROLL",
+      "status": "proposed",
+      "rationale": "计划由选课服务代码实现，目前仅为待确认设计关系，代码尚未实现。"
+    },
+    {
+      "type": "VERIFIED_BY",
+      "source_key": "REQ-ENROLL",
+      "target_key": "TEST-ENROLL",
+      "status": "proposed",
+      "rationale": "计划通过基础验收用例验证该需求，目前没有测试执行证据。"
+    }
+  ]
+}

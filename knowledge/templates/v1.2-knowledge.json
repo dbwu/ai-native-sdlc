@@ -1,0 +1,697 @@
+{
+  "entities": [
+    {
+      "key": "DOMAIN-COURSE",
+      "kind": "Domain",
+      "name": "选课业务领域",
+      "description": "教学用选课系统设计，使用预置学生身份，只处理单学期；账号、支付和退课不在本轮范围。",
+      "status": "draft",
+      "attributes": {
+        "glossary": {
+          "学生": "本教程预置的学生身份",
+          "课程": "教学内容定义",
+          "教学班": "本学期可选择的具体开课实例",
+          "选课记录": "某学生与某教学班的唯一关联"
+        }
+      }
+    },
+    {
+      "key": "REQ-ENROLL",
+      "kind": "Requirement",
+      "name": "基础选课与已选列表",
+      "description": "学生可以查询教学班目录、选择教学班并查看自己的已选列表；同一选课请求重复提交保持幂等。教学用选课系统设计，使用预置学生身份，只处理单学期；账号、支付和退课不在本轮范围。",
+      "status": "draft",
+      "attributes": {
+        "requirement_type": "functional",
+        "acceptance_criteria": [
+          "学生能查看当前学期教学班目录及课程名称、授课教师。",
+          "学生首次选择一个存在的教学班后，生成一条选课记录并出现在自己的已选列表。",
+          "同一学生重复选择同一教学班时返回原记录，不新增记录，不产生重复的业务写入。",
+          "不同学生的已选列表相互隔离。"
+        ]
+      }
+    },
+    {
+      "key": "BR-UNIQUE",
+      "kind": "BusinessRule",
+      "name": "同一学生同一教学班的选课保持唯一与幂等",
+      "description": "同一学生对同一教学班只能保留一条选课记录；重复请求返回已有结果。这是待实现的业务规则定义，表达式仅用于知识描述。",
+      "status": "draft",
+      "attributes": {
+        "expression": {
+          "unique_fields": [
+            "student_id",
+            "offering_id"
+          ],
+          "duplicate_request": "return_existing_enrollment",
+          "new_record_on_duplicate": false
+        }
+      }
+    },
+    {
+      "key": "COMP-ENROLL",
+      "kind": "ArchitectureComponent",
+      "name": "选课服务",
+      "description": "待实现的选课服务设计，在基础幂等与容量控制上新增固定周课表的闭区间冲突校验及同一学生的并发保护。",
+      "status": "draft",
+      "attributes": {
+        "responsibility": "提供单学期基础选课与已选列表；在一致事务内保护同一学生、检查全部上课时段是否冲突、检查容量并幂等写入。",
+        "extensions": {
+          "implementation_status": "planned",
+          "transaction_plan": [
+            "开始数据库事务；按统一顺序先锁定当前学生的选课范围，再锁定目标教学班，或采用等效的串行化保护",
+            "查询已有的同一学生与教学班选课记录，存在则直接返回原记录",
+            "读取当前学生已选教学班的全部固定周时段；若相同星期的闭区间有共同节次则拒绝新增",
+            "检查目标教学班仍有容量，容量为零或已满则拒绝新增",
+            "创建唯一选课记录并同步更新人数；所有校验与写入原子提交，失败完整回滚"
+          ]
+        }
+      }
+    },
+    {
+      "key": "IF-ENROLL",
+      "kind": "Interface",
+      "name": "选课 HTTP 接口设计",
+      "description": "待实现的 HTTP 接口设计，补充固定周上课时段、闭区间冲突拒绝以及与容量和幂等行为的组合规则。",
+      "status": "draft",
+      "attributes": {
+        "protocol": "http",
+        "extensions": {
+          "implementation_status": "planned",
+          "endpoints": [
+            {
+              "method": "GET",
+              "path": "/offerings",
+              "purpose": "查询当前学期的教学班目录",
+              "response": {
+                "status": 200,
+                "fields": [
+                  "offering_id",
+                  "course_name",
+                  "teacher",
+                  "capacity",
+                  "enrolled_count",
+                  "meeting_slots"
+                ]
+              }
+            },
+            {
+              "method": "POST",
+              "path": "/offerings/{id}/enroll",
+              "purpose": "在同一事务中保持幂等并检查固定周时段冲突与容量，再新增选课",
+              "request_context": {
+                "student_id": "预置的当前学生标识"
+              },
+              "responses": [
+                {
+                  "status": 201,
+                  "meaning": "首次选课成功"
+                },
+                {
+                  "status": 200,
+                  "meaning": "重复请求返回已有选课记录，不新增记录"
+                },
+                {
+                  "status": 409,
+                  "code": "CAPACITY_FULL",
+                  "meaning": "容量为零或已满，未创建新选课记录"
+                },
+                {
+                  "status": 422,
+                  "code": "INVALID_CAPACITY",
+                  "meaning": "容量不符合非负整数约束，设计要求拒绝无效数据"
+                },
+                {
+                  "status": 409,
+                  "code": "TIME_CONFLICT",
+                  "meaning": "任意上课时段与已选时段冲突，未新增记录或改变人数"
+                },
+                {
+                  "status": 422,
+                  "code": "INVALID_MEETING_SLOT",
+                  "meaning": "星期或节次区间不符合定义"
+                }
+              ]
+            },
+            {
+              "method": "GET",
+              "path": "/me/enrollments",
+              "purpose": "查询预置当前学生的已选教学班列表",
+              "response": {
+                "status": 200,
+                "fields": [
+                  "enrollment_id",
+                  "offering_id",
+                  "course_name",
+                  "meeting_slots"
+                ]
+              },
+              "request_context": {
+                "student_id": "预置的当前学生标识"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "key": "DM-ENROLL",
+      "kind": "DataModel",
+      "name": "选课数据模型设计",
+      "description": "待实现的选课数据模型，增加教学班的固定周上课时段；采用星期1至7与整数节次闭区间，不区分单双周或周次范围。",
+      "status": "draft",
+      "attributes": {
+        "schema_definition": {
+          "purpose": "待实现的数据结构设计，尚未创建业务数据库表",
+          "tables": {
+            "Student": {
+              "fields": {
+                "student_id": "字符串，主键，教学示例预置身份"
+              }
+            },
+            "Course": {
+              "fields": {
+                "course_id": "字符串，主键",
+                "name": "课程名称"
+              }
+            },
+            "Offering": {
+              "fields": {
+                "offering_id": "字符串，主键",
+                "course_id": "关联 Course.course_id",
+                "teacher": "授课教师名称",
+                "capacity": "非负整数，零表示不接受新的选课",
+                "enrolled_count": "非负整数，有效选课记录数，初始为零",
+                "meeting_slots": "关联一个或多个 MeetingSlot，整个学期按同一周课表重复"
+              },
+              "constraints": [
+                {
+                  "type": "check",
+                  "expression": "capacity >= 0 and enrolled_count >= 0 and enrolled_count <= capacity"
+                },
+                {
+                  "type": "transaction_consistency",
+                  "expression": "enrolled_count 等于该教学班有效 Enrollment 记录数，容量检查、插入及人数更新原子提交"
+                }
+              ]
+            },
+            "Enrollment": {
+              "fields": {
+                "enrollment_id": "字符串，主键",
+                "student_id": "关联 Student.student_id",
+                "offering_id": "关联 Offering.offering_id"
+              },
+              "constraints": [
+                {
+                  "type": "unique",
+                  "fields": [
+                    "student_id",
+                    "offering_id"
+                  ],
+                  "purpose": "同一学生在同一教学班最多保留一条选课记录"
+                }
+              ]
+            },
+            "MeetingSlot": {
+              "fields": {
+                "slot_id": "字符串，主键",
+                "offering_id": "关联 Offering.offering_id",
+                "weekday": "整数，1表示周一，7表示周日",
+                "start_period": "正整数，起始节次，包含该节",
+                "end_period": "正整数，结束节次，包含该节"
+              },
+              "constraints": [
+                {
+                  "type": "check",
+                  "expression": "1 <= weekday <= 7 and 1 <= start_period <= end_period"
+                }
+              ]
+            }
+          },
+          "transaction_constraints": [
+            "同一学生的新增选课应串行化或采用等效隔离，避免并发请求绕过课表冲突校验。",
+            "同一教学班的容量检查与人数更新应并发安全。",
+            "课表冲突、容量校验、唯一选课记录和人数更新必须在同一事务中一致提交。"
+          ]
+        },
+        "extensions": {
+          "implementation_status": "planned"
+        }
+      }
+    },
+    {
+      "key": "CODE-ENROLL",
+      "kind": "CodeArtifact",
+      "name": "选课服务待实现代码",
+      "description": "计划实现带固定周闭区间冲突校验的选课业务代码，并保留基础幂等与容量并发安全；当前仍无源码、代码版本或执行证据。",
+      "status": "draft",
+      "attributes": {
+        "path": "src/enrollment_service.py",
+        "symbol": "enroll",
+        "language": "python",
+        "extensions": {
+          "implementation_status": "planned",
+          "planned_responsibilities": [
+            "查询教学班目录",
+            "按预置学生查询已选列表",
+            "首次选课创建记录",
+            "重复请求返回原记录并保持唯一约束",
+            "在事务内检查教学班容量并拒绝零容量或满员的新选课",
+            "为最后名额提供并发安全的原子写入",
+            "重复请求不重复消耗容量，失败时完整回滚",
+            "校验星期与整数节次闭区间，并逐一比较目标和已选教学班的所有时段",
+            "将共同端点视为时间冲突，不将不同星期或无共同节次视为冲突",
+            "在统一锁顺序下保护同一学生的并发新增选课，保持容量和课表一致性"
+          ]
+        }
+      }
+    },
+    {
+      "key": "TEST-ENROLL",
+      "kind": "TestCase",
+      "name": "基础选课与幂等验收定义",
+      "description": "待实现、待执行的验收用例定义，不代表测试已经运行或通过。",
+      "status": "draft",
+      "attributes": {
+        "steps": [
+          "预置学生 S001、S002 以及教学班 O101、O102。",
+          "查询教学班目录，检查可以看到 O101、O102 及课程名称、教师。",
+          "S001 首次选择 O101，查询 S001 已选列表。",
+          "S001 再次选择 O101，比较两次返回的选课记录标识和记录数量。",
+          "查询 S002 已选列表，检查不会出现 S001 的选课记录。"
+        ],
+        "expected_result": "目录内容正确；S001 首次选课成功，重复请求返回同一记录且总记录数为一；S002 的已选列表保持独立。",
+        "extensions": {
+          "execution_status": "not_run"
+        }
+      }
+    },
+    {
+      "key": "REQ-CAPACITY",
+      "kind": "Requirement",
+      "name": "教学班容量限制",
+      "description": "新增选课必须遵守教学班容量，容量为零或已满时拒绝新的选课；并发请求不能导致超额，已有选课的重复请求仍按基础需求返回原记录。",
+      "status": "draft",
+      "attributes": {
+        "requirement_type": "functional",
+        "acceptance_criteria": [
+          "capacity 为非负整数；capacity=0 的教学班拒绝任何新的选课，记录与人数保持不变。",
+          "capacity=1 时，第一名学生选课成功；第二名学生的新选课被拒绝，最终有效选课人数为一。",
+          "剩余一个名额时两名不同学生并发选课，至多一人成功，事务提交后选课人数不超过容量。",
+          "已选学生重复请求同一教学班时，返回原记录，不再消耗名额；即使教学班已满也保持该幂等结果。",
+          "容量校验、选课记录写入及人数变化必须处于同一事务；拒绝或失败时不留下部分写入。"
+        ]
+      }
+    },
+    {
+      "key": "BR-CAPACITY",
+      "kind": "BusinessRule",
+      "name": "教学班新增选课不得超过容量",
+      "description": "教学班容量是非负整数；仅在尚有名额时接受新的选课。容量校验与写入应在事务内串行化或使用等效的原子条件，不能用先查人数后无保护写入实现。",
+      "status": "draft",
+      "attributes": {
+        "expression": {
+          "capacity": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "new_enrollment_condition": "enrolled_count < capacity",
+          "capacity_zero": "reject_new_enrollment",
+          "duplicate_request": "return_existing_before_capacity_check",
+          "atomicity": "check_and_write_in_one_transaction"
+        }
+      }
+    },
+    {
+      "key": "TEST-CAPACITY",
+      "kind": "TestCase",
+      "name": "零容量、满员与并发限额验收定义",
+      "description": "待实现、待执行的容量与并发验收用例，不代表已经完成业务测试。",
+      "status": "draft",
+      "attributes": {
+        "steps": [
+          "预置容量为零的教学班 O201，学生 S001 尝试首次选课。",
+          "预置容量为一的教学班 O202，S001 首次选课，再由 S002 选课。",
+          "让已选 O202 的 S001 重复请求，检查仍返回原选课记录且人数不增加。",
+          "预置只剩一个名额的教学班 O203，同步启动 S001、S002 两个不同学生的选课请求。",
+          "在两个请求结束后统计成功数、有效选课记录和 enrolled_count，并检查拒绝请求未留下部分写入。"
+        ],
+        "expected_result": "零容量拒绝新选课；满员拒绝新增；重复请求保持幂等；并发至多一人占用最后名额，记录与人数一致且不超容量。",
+        "extensions": {
+          "execution_status": "not_run"
+        }
+      }
+    },
+    {
+      "key": "REQ-TIME-CONFLICT",
+      "kind": "Requirement",
+      "name": "教学班课表时间冲突校验",
+      "description": "在单学期每周固定重复的课表假设下，学生不能新增选择与已选教学班时间重叠的教学班；不区分单双周和周次范围，时间按星期与整数节次闭区间定义。",
+      "status": "draft",
+      "attributes": {
+        "requirement_type": "functional",
+        "acceptance_criteria": [
+          "每个教学班包含一个或多个固定上课时段；weekday 为 1 至 7 的整数，start_period 与 end_period 为正整数且 start_period <= end_period。",
+          "同一星期的时段使用闭区间 [start_period,end_period]；只要两个区间有共同节次就拒绝新增选课，端点相同也算冲突。",
+          "已选周一第3至4节时，新增周一第4至5节被拒绝；新增周一第5至6节允许，新增周二第3至4节允许。",
+          "一个教学班有多个上课时段时，只要任意时段与学生已选的任意时段冲突，就拒绝新增，所有原选课记录和人数保持不变。",
+          "时间冲突校验、容量检查与选课写入应在同一事务内完成，并串行化同一学生的并发选课，防止两门冲突课程同时选入。",
+          "已有选课的重复请求继续返回原记录；不得因检查顺序错误把重复请求当成与自身时间冲突。"
+        ]
+      }
+    },
+    {
+      "key": "BR-TIME-CONFLICT",
+      "kind": "BusinessRule",
+      "name": "同一学生已选教学班的固定周课表不可重叠",
+      "description": "本教程假设整个学期每周课表相同。相同 weekday 的两个整数节次闭区间满足 a.start_period <= b.end_period 且 b.start_period <= a.end_period 时发生冲突；共同端点也算冲突。规则表达式只记录待实现设计。",
+      "status": "draft",
+      "attributes": {
+        "expression": {
+          "recurrence": "every_week_for_the_whole_single_term",
+          "weekday": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 7
+          },
+          "period_interval": "closed",
+          "valid_periods": "1 <= start_period <= end_period",
+          "overlap": "a.weekday == b.weekday and a.start_period <= b.end_period and b.start_period <= a.end_period",
+          "shared_endpoint_is_conflict": true,
+          "duplicate_request": "return_existing_before_conflict_check"
+        }
+      }
+    },
+    {
+      "key": "TEST-TIME-CONFLICT",
+      "kind": "TestCase",
+      "name": "闭区间课表冲突与并发验收定义",
+      "description": "待实现、待执行的固定周课表验收定义，覆盖共同端点、不同星期、多时段与同一学生并发选课，当前没有执行结果。",
+      "status": "draft",
+      "attributes": {
+        "steps": [
+          "预置学生 S001 已选周一第3至4节的教学班，容量均有余量。",
+          "S001 尝试新增周一第4至5节的教学班，检查共同第4节被识别为冲突。",
+          "S001 尝试新增周一第5至6节及周二第3至4节的教学班，检查无共同节次或不同星期时允许。",
+          "准备一个含多个上课时段的教学班，其中仅一个时段与已有课表重叠，检查整个新增选课被拒绝。",
+          "向已选教学班发起重复请求，检查返回原记录，不触发与自身的时间冲突。",
+          "让同一学生并发选择两门相互冲突但各自有名额的教学班，检查事务保护后至多一门选入。",
+          "提交 weekday=0、weekday=8、起始节次小于1或起始节次大于结束节次的时段，检查无效定义被拒绝。"
+        ],
+        "expected_result": "相同星期且闭区间重叠被拒绝，共同端点也冲突；不同星期或无共同节次允许；多时段任一冲突整体拒绝；幂等不受影响；同一学生的并发冲突请求不能同时成功，拒绝时记录与人数不变。",
+        "extensions": {
+          "execution_status": "not_run"
+        }
+      }
+    }
+  ],
+  "relationships": [
+    {
+      "type": "CONTAINS",
+      "source_key": "DOMAIN-COURSE",
+      "target_key": "REQ-ENROLL",
+      "status": "proposed",
+      "rationale": "选课领域包含该需求、规则或服务设计。"
+    },
+    {
+      "type": "CONTAINS",
+      "source_key": "DOMAIN-COURSE",
+      "target_key": "BR-UNIQUE",
+      "status": "proposed",
+      "rationale": "选课领域包含该需求、规则或服务设计。"
+    },
+    {
+      "type": "CONTAINS",
+      "source_key": "DOMAIN-COURSE",
+      "target_key": "COMP-ENROLL",
+      "status": "proposed",
+      "rationale": "选课领域包含该需求、规则或服务设计。"
+    },
+    {
+      "type": "CONTAINS",
+      "source_key": "COMP-ENROLL",
+      "target_key": "IF-ENROLL",
+      "status": "proposed",
+      "rationale": "选课服务包含对应的接口、数据模型、计划代码或验收定义。"
+    },
+    {
+      "type": "CONTAINS",
+      "source_key": "COMP-ENROLL",
+      "target_key": "DM-ENROLL",
+      "status": "proposed",
+      "rationale": "选课服务包含对应的接口、数据模型、计划代码或验收定义。"
+    },
+    {
+      "type": "CONTAINS",
+      "source_key": "COMP-ENROLL",
+      "target_key": "CODE-ENROLL",
+      "status": "proposed",
+      "rationale": "选课服务包含对应的接口、数据模型、计划代码或验收定义。"
+    },
+    {
+      "type": "CONTAINS",
+      "source_key": "COMP-ENROLL",
+      "target_key": "TEST-ENROLL",
+      "status": "proposed",
+      "rationale": "选课服务包含对应的接口、数据模型、计划代码或验收定义。"
+    },
+    {
+      "type": "DEPENDS_ON",
+      "source_key": "COMP-ENROLL",
+      "target_key": "REQ-ENROLL",
+      "status": "proposed",
+      "rationale": "该技术产物依赖基础选课与幂等需求；需求变化时需要复核。"
+    },
+    {
+      "type": "DEPENDS_ON",
+      "source_key": "IF-ENROLL",
+      "target_key": "REQ-ENROLL",
+      "status": "proposed",
+      "rationale": "该技术产物依赖基础选课与幂等需求；需求变化时需要复核。"
+    },
+    {
+      "type": "DEPENDS_ON",
+      "source_key": "DM-ENROLL",
+      "target_key": "REQ-ENROLL",
+      "status": "proposed",
+      "rationale": "该技术产物依赖基础选课与幂等需求；需求变化时需要复核。"
+    },
+    {
+      "type": "DEPENDS_ON",
+      "source_key": "CODE-ENROLL",
+      "target_key": "REQ-ENROLL",
+      "status": "proposed",
+      "rationale": "该技术产物依赖基础选课与幂等需求；需求变化时需要复核。"
+    },
+    {
+      "type": "DEPENDS_ON",
+      "source_key": "TEST-ENROLL",
+      "target_key": "REQ-ENROLL",
+      "status": "proposed",
+      "rationale": "该技术产物依赖基础选课与幂等需求；需求变化时需要复核。"
+    },
+    {
+      "type": "DERIVED_FROM",
+      "source_key": "REQ-ENROLL",
+      "target_key": "BR-UNIQUE",
+      "status": "proposed",
+      "rationale": "基础选课的幂等验收条件依据唯一与幂等业务规则。"
+    },
+    {
+      "type": "IMPLEMENTED_BY",
+      "source_key": "REQ-ENROLL",
+      "target_key": "CODE-ENROLL",
+      "status": "proposed",
+      "rationale": "计划由选课服务代码实现，目前仅为待确认设计关系，代码尚未实现。"
+    },
+    {
+      "type": "VERIFIED_BY",
+      "source_key": "REQ-ENROLL",
+      "target_key": "TEST-ENROLL",
+      "status": "proposed",
+      "rationale": "计划通过基础验收用例验证该需求，目前没有测试执行证据。"
+    },
+    {
+      "type": "CONTAINS",
+      "source_key": "DOMAIN-COURSE",
+      "target_key": "REQ-CAPACITY",
+      "status": "proposed",
+      "rationale": "选课领域新增容量需求及其业务规则。"
+    },
+    {
+      "type": "CONTAINS",
+      "source_key": "DOMAIN-COURSE",
+      "target_key": "BR-CAPACITY",
+      "status": "proposed",
+      "rationale": "选课领域新增容量需求及其业务规则。"
+    },
+    {
+      "type": "CONTAINS",
+      "source_key": "COMP-ENROLL",
+      "target_key": "TEST-CAPACITY",
+      "status": "proposed",
+      "rationale": "选课服务新增容量与并发验收定义。"
+    },
+    {
+      "type": "DEPENDS_ON",
+      "source_key": "COMP-ENROLL",
+      "target_key": "REQ-CAPACITY",
+      "status": "proposed",
+      "rationale": "该技术产物需要落实容量需求；容量定义变化时需要复核。"
+    },
+    {
+      "type": "DEPENDS_ON",
+      "source_key": "IF-ENROLL",
+      "target_key": "REQ-CAPACITY",
+      "status": "proposed",
+      "rationale": "该技术产物需要落实容量需求；容量定义变化时需要复核。"
+    },
+    {
+      "type": "DEPENDS_ON",
+      "source_key": "DM-ENROLL",
+      "target_key": "REQ-CAPACITY",
+      "status": "proposed",
+      "rationale": "该技术产物需要落实容量需求；容量定义变化时需要复核。"
+    },
+    {
+      "type": "DEPENDS_ON",
+      "source_key": "CODE-ENROLL",
+      "target_key": "REQ-CAPACITY",
+      "status": "proposed",
+      "rationale": "该技术产物需要落实容量需求；容量定义变化时需要复核。"
+    },
+    {
+      "type": "DEPENDS_ON",
+      "source_key": "TEST-CAPACITY",
+      "target_key": "REQ-CAPACITY",
+      "status": "proposed",
+      "rationale": "该技术产物需要落实容量需求；容量定义变化时需要复核。"
+    },
+    {
+      "type": "DEPENDS_ON",
+      "source_key": "TEST-CAPACITY",
+      "target_key": "REQ-ENROLL",
+      "status": "proposed",
+      "rationale": "容量用例还要复核基础幂等行为不被新增限制破坏。"
+    },
+    {
+      "type": "DERIVED_FROM",
+      "source_key": "REQ-CAPACITY",
+      "target_key": "BR-CAPACITY",
+      "status": "proposed",
+      "rationale": "容量需求依据新增选课不能超过教学班容量的规则。"
+    },
+    {
+      "type": "IMPLEMENTED_BY",
+      "source_key": "REQ-CAPACITY",
+      "target_key": "CODE-ENROLL",
+      "status": "proposed",
+      "rationale": "计划在同一选课代码资产中实现容量限制，尚未实现。"
+    },
+    {
+      "type": "VERIFIED_BY",
+      "source_key": "REQ-CAPACITY",
+      "target_key": "TEST-CAPACITY",
+      "status": "proposed",
+      "rationale": "计划以零容量、满员和并发用例验证容量需求，尚未执行。"
+    },
+    {
+      "type": "CONSTRAINED_BY",
+      "source_key": "REQ-ENROLL",
+      "target_key": "BR-CAPACITY",
+      "status": "proposed",
+      "rationale": "基础新增选课受到容量规则约束，已有记录的重复请求仍保持幂等。"
+    },
+    {
+      "type": "CONTAINS",
+      "source_key": "DOMAIN-COURSE",
+      "target_key": "REQ-TIME-CONFLICT",
+      "status": "proposed",
+      "rationale": "选课领域新增固定周课表冲突需求及业务规则。"
+    },
+    {
+      "type": "CONTAINS",
+      "source_key": "DOMAIN-COURSE",
+      "target_key": "BR-TIME-CONFLICT",
+      "status": "proposed",
+      "rationale": "选课领域新增固定周课表冲突需求及业务规则。"
+    },
+    {
+      "type": "CONTAINS",
+      "source_key": "COMP-ENROLL",
+      "target_key": "TEST-TIME-CONFLICT",
+      "status": "proposed",
+      "rationale": "选课服务新增课表闭区间冲突和并发验收定义。"
+    },
+    {
+      "type": "DEPENDS_ON",
+      "source_key": "COMP-ENROLL",
+      "target_key": "REQ-TIME-CONFLICT",
+      "status": "proposed",
+      "rationale": "该技术产物需要落实课表冲突需求；时段定义变化时需要复核。"
+    },
+    {
+      "type": "DEPENDS_ON",
+      "source_key": "IF-ENROLL",
+      "target_key": "REQ-TIME-CONFLICT",
+      "status": "proposed",
+      "rationale": "该技术产物需要落实课表冲突需求；时段定义变化时需要复核。"
+    },
+    {
+      "type": "DEPENDS_ON",
+      "source_key": "DM-ENROLL",
+      "target_key": "REQ-TIME-CONFLICT",
+      "status": "proposed",
+      "rationale": "该技术产物需要落实课表冲突需求；时段定义变化时需要复核。"
+    },
+    {
+      "type": "DEPENDS_ON",
+      "source_key": "CODE-ENROLL",
+      "target_key": "REQ-TIME-CONFLICT",
+      "status": "proposed",
+      "rationale": "该技术产物需要落实课表冲突需求；时段定义变化时需要复核。"
+    },
+    {
+      "type": "DEPENDS_ON",
+      "source_key": "TEST-TIME-CONFLICT",
+      "target_key": "REQ-TIME-CONFLICT",
+      "status": "proposed",
+      "rationale": "该技术产物需要落实课表冲突需求；时段定义变化时需要复核。"
+    },
+    {
+      "type": "DEPENDS_ON",
+      "source_key": "TEST-TIME-CONFLICT",
+      "target_key": "REQ-ENROLL",
+      "status": "proposed",
+      "rationale": "课表冲突用例还要复核已有选课的幂等返回不被新增规则破坏。"
+    },
+    {
+      "type": "DERIVED_FROM",
+      "source_key": "REQ-TIME-CONFLICT",
+      "target_key": "BR-TIME-CONFLICT",
+      "status": "proposed",
+      "rationale": "时间冲突需求依据固定周课表的闭区间不重叠规则。"
+    },
+    {
+      "type": "IMPLEMENTED_BY",
+      "source_key": "REQ-TIME-CONFLICT",
+      "target_key": "CODE-ENROLL",
+      "status": "proposed",
+      "rationale": "计划在同一选课代码资产中实现时间冲突校验，尚未实现。"
+    },
+    {
+      "type": "VERIFIED_BY",
+      "source_key": "REQ-TIME-CONFLICT",
+      "target_key": "TEST-TIME-CONFLICT",
+      "status": "proposed",
+      "rationale": "计划用闭区间和并发验收定义验证时间冲突需求，尚未执行。"
+    },
+    {
+      "type": "CONSTRAINED_BY",
+      "source_key": "REQ-ENROLL",
+      "target_key": "BR-TIME-CONFLICT",
+      "status": "proposed",
+      "rationale": "基础新增选课受到课表冲突规则约束，重复请求仍返回已有结果。"
+    }
+  ]
+}

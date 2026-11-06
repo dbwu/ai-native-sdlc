@@ -1,0 +1,12 @@
+<script setup lang="ts">
+import { computed,ref } from 'vue'
+import { request } from '../api/client'
+import { state,notify,loadSnapshot } from '../store/workbench'
+import type { RecordData } from '../types'
+const show=ref(false),changes=ref<RecordData[]>([]),error=ref(''),reason=ref(''),actor=ref(state.actor||'本地维护者')
+const available=computed(()=>state.snapshot?.workflow.definition.scenario==='generic_v1'&&state.snapshot?.workflow.status==='RUNNING'&&state.snapshot?.task?.status==='READY')
+let version=0,taskVersion=0
+async function open(){try{const result=await request<RecordData>(`/workbench/workflows/${state.flowId}/artifact-draft`);changes.value=result.changes.map((change:RecordData)=>({...change,attributesText:JSON.stringify(change.data.attributes,null,2)}));version=result.workflow_version;taskVersion=state.snapshot!.task!.version;show.value=true;error.value=''}catch(e){error.value=(e as Error).message}}
+async function submit(){state.busy=true;try{await request(`/workbench/workflows/${state.flowId}/artifacts`,{expected_version:version,task_version:taskVersion,actor:actor.value,reason:reason.value,changes:changes.value.map(c=>({op:c.op,id:c.id,data:{...c.data,attributes:JSON.parse(c.attributesText)}}))});show.value=false;await loadSnapshot();notify('人工产物已形成待审提案，尚未提交知识。')}catch(e){error.value=(e as Error).message}finally{state.busy=false}}
+</script>
+<template><section v-if="available" class="panel project-panel"><button class="button secondary" :disabled="state.busy" @click="open">人工提交本阶段产物</button><p>提交全部绑定产物后仍需校验与明确审批。人工模式未配置执行器时，不会声称已运行代码。</p><form v-if="show" @submit.prevent="submit"><article v-for="change in changes" :key="change.id" class="editor-box"><label class="field">产物名称<input v-model="change.data.name" required></label><label class="field">产物说明<textarea v-model="change.data.description" rows="3"></textarea></label><label class="field">类型属性与内容（JSON）<textarea v-model="change.attributesText" rows="10" class="json-editor"></textarea></label></article><label class="field">操作署名<input v-model="actor" required></label><label class="field">提交依据<textarea v-model="reason" required></textarea></label><button class="button primary" :disabled="state.busy||!actor.trim()||!reason.trim()">提交待审产物</button> <button class="button secondary" type="button" @click="show=false">收起</button></form><p v-if="error" class="form-error" role="alert">{{ error }}</p></section></template>

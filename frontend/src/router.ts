@@ -7,9 +7,13 @@ import ExecutionView from './views/ExecutionView.vue'
 import TraceView from './views/TraceView.vue'
 import HistoryView from './views/HistoryView.vue'
 import { state } from './store/workbench'
+import ProjectKnowledgeView from './views/ProjectKnowledgeView.vue'
+import ProjectProposalsView from './views/ProjectProposalsView.vue'
 
 export const router = createRouter({ history:createWebHashHistory('/workbench/'), routes:[
   { path:'/', redirect:'/projects' }, { path:'/projects', component:ProjectsView },
+  { path:'/projects/:projectId/knowledge',component:ProjectKnowledgeView },
+  { path:'/projects/:projectId/proposals/:proposalId?',component:ProjectProposalsView },
   { path:'/workflows/:id', component:WorkflowLayout, children:[
     { path:'', redirect:to=>`/workflows/${to.params.id}/overview` },
     { path:'overview', component:OverviewView }, { path:'review', component:ReviewView },

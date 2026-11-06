@@ -21,7 +21,7 @@ test = ["pytest>=8,<10", "httpx>=0.27,<1"]
 include = ["knowledge*"]
 
 [tool.setuptools.package-data]
-knowledge = ["migrations/*.sql", "web/*", "web/assets/*"]
+knowledge = ["migrations/*.sql", "web/*", "web/assets/*", "templates/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

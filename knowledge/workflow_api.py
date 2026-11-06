@@ -17,7 +17,8 @@ def workflow_router(url_provider):
     @router.get("/templates", summary="查询可用的 SDLC 参考流程",
                 description="返回四阶段模板及唯一内置可信参考执行场景。扩展其他业务或仓库需另行实现并授权适配器。")
     def templates():
-        return {"template": "feature_delivery_v1", "stages": STAGES, "scenarios": ["order_cancellation_v1"],
+        return {"template": "feature_delivery_v1", "stages": STAGES, "scenarios": ["order_cancellation_v1", "generic_v1"],
+                "executors": [{'id':'manual','name':'人工提交产物'}, {'id':'course_selection_v1','name':'选课教学适配器','releases':['v1','v1.1','v1.2']}],
                 "message": "订单取消仅为调用方明确选择的合成参考，不是对现有项目业务规则的推定。"}
 
     @router.post("", status_code=201, summary="创建 SDLC 草稿流程",
