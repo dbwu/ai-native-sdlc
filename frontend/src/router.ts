@@ -9,11 +9,15 @@ import HistoryView from './views/HistoryView.vue'
 import { state } from './store/workbench'
 import ProjectKnowledgeView from './views/ProjectKnowledgeView.vue'
 import ProjectProposalsView from './views/ProjectProposalsView.vue'
+import DesignStudioView from './views/DesignStudioView.vue'
+import WorkspaceView from './views/WorkspaceView.vue'
 
 export const router = createRouter({ history:createWebHashHistory('/workbench/'), routes:[
   { path:'/', redirect:'/projects' }, { path:'/projects', component:ProjectsView },
   { path:'/projects/:projectId/knowledge',component:ProjectKnowledgeView },
   { path:'/projects/:projectId/proposals/:proposalId?',component:ProjectProposalsView },
+  { path:'/projects/:projectId/design',component:DesignStudioView },
+  { path:'/projects/:projectId/engineering',component:WorkspaceView },
   { path:'/workflows/:id', component:WorkflowLayout, children:[
     { path:'', redirect:to=>`/workflows/${to.params.id}/overview` },
     { path:'overview', component:OverviewView }, { path:'review', component:ReviewView },

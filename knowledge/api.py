@@ -21,6 +21,9 @@ from .models import (
 )
 from .semantics import KnowledgeError, RULES
 from .platform_api import platform_router
+from .design_api import design_router
+from .design_worker import design_lifespan
+from .workspace_api import workspace_router
 from .service import KnowledgeService
 from .operations_api import operations_router
 from .runtime_api import runtime_router
@@ -56,8 +59,10 @@ class RelationView(RelationContent):
 
 def create_app(url: str | None = None) -> FastAPI:
     app = FastAPI(
+        lifespan=design_lifespan(lambda: url or database_url()),
         title="工程知识模型 API", version="0.4.1",
-        description="AI 原生 SDLC 第一至四阶段，元模型版本 1。提供知识模型、知识操作、Agent 协作与带显式门禁的 SDLC 流程。"
+        description="AI 原生 SDLC 第一至四阶段，元模型版本 1。提供知识模型、知识操作、Agent 协作与带显式门禁的 SDLC 流程，"
+                    "以及仅需求启动的模型设计、不可变工程快照和隔离执行接口。模型与隔离执行默认未配置。"
                     "供本地或可信环境使用；调用方提交的操作者信息仅用于归属记录，不代表已完成身份认证。"
                     "字段名、枚举值和路由保持稳定，中文名称可通过 /metamodel 查询。",
         openapi_tags=[
@@ -182,6 +187,8 @@ def create_app(url: str | None = None) -> FastAPI:
     app.include_router(workflow_router(lambda: url or database_url()))
     app.include_router(workbench_router(lambda: url or database_url()))
     app.include_router(platform_router(lambda: url or database_url()))
+    app.include_router(design_router(lambda: url or database_url()))
+    app.include_router(workspace_router(lambda: url or database_url()))
 
     @app.get("/", include_in_schema=False)
     def home():
