@@ -187,11 +187,86 @@ def test_model_can_return_structured_business_diagrams(configured, monkeypatch, 
     prompt = json.loads(calls[0][0].data)["messages"][0]["content"]
     assert "每张图只说明一条路径" in prompt and "不专门为画图提出澄清问题" in prompt
     assert "系统边界外已有依据的业务角色" in prompt and "不得虚构业务角色、职责或操作" in prompt
+    assert "已绑定的需求及验收条件、设计依据和已保存澄清答复" in prompt
+    assert "归属关系不等于调用" in prompt
     parsed = model.model_validate(result["document"])
     assert parsed.sequence_diagrams[0].model_dump() == sequence
     assert parsed.use_case_diagrams[0].model_dump() == use_case
     previous = model.model_validate(design)
-    assert previous.sequence_diagrams == [] and previous.use_case_diagrams == []
+    assert previous.sequence_diagrams == [] and previous.use_case_diagrams == [] and previous.collaboration_links == []
+
+
+@pytest.fixture
+def capacity_design():
+    requirements = ["REQ-CAPACITY"]
+    service = {"kind": "component", "key": "Enrollment"}
+    interface = {"kind": "interface", "key": "Enroll"}
+    data = {"kind": "data_model", "key": "Seats"}
+    return {
+        "summary": "容量限制设计",
+        "components": [{"key": "Enrollment", "name": "选课服务", "requirement_ids": requirements,
+                        "responsibility": "检查教学班容量"}],
+        "interfaces": [{"key": "Enroll", "name": "提交选课", "requirement_ids": requirements,
+                        "component_key": "Enrollment", "protocol": "HTTP", "contract": {"method": "POST"}}],
+        "data_models": [{"key": "Seats", "name": "教学班容量", "requirement_ids": ["REQ-SECTION"],
+                         "component_key": "Enrollment", "schema_definition": {"capacity": "integer"}}],
+        "test_plan": [{"key": "Capacity", "name": "满员时拒绝新增", "requirement_ids": requirements,
+                       "steps": ["提交选课"], "expected_result": "拒绝满员请求"}],
+        "collaboration_links": [
+            {"source": interface, "target": service, "type": "calls", "requirement_ids": requirements,
+             "rationale": "选课入口将请求交给服务判断是否满员"},
+            {"source": service, "target": data, "type": "reads", "requirement_ids": requirements,
+             "rationale": "服务读取教学班余量判断是否满员"},
+            {"source": service, "target": data, "type": "writes", "requirement_ids": requirements,
+             "rationale": "允许选课后扣减教学班余量"},
+            {"source": data, "target": service, "type": "depends_on", "requirement_ids": requirements,
+             "rationale": "由选课服务负责教学班余量的更新策略"},
+        ],
+    }
+
+
+@pytest.mark.parametrize("confirmed_scope,model", [(False, DesignDocument), (True, ConfirmedScopeDesign)])
+def test_model_can_propose_capacity_collaborations(configured, monkeypatch, confirmed_scope, model, capacity_design):
+    calls = install_transport(monkeypatch, response(capacity_design))
+
+    result = gateway.complete_design({"requirements": [{"id": "REQ-CAPACITY"}, {"id": "REQ-SECTION"}]},
+                                     model.model_json_schema(), confirmed_scope=confirmed_scope)
+
+    request = json.loads(calls[0][0].data)
+    schema = json.loads(request["messages"][1]["content"])["output_schema"]
+    assert schema["properties"]["collaboration_links"]["maxItems"] == 50
+    parsed = model.model_validate(result["document"])
+    assert [link.model_dump() for link in parsed.collaboration_links] == capacity_design["collaboration_links"]
+
+
+@pytest.mark.parametrize("scenario,message", [
+    ("unknown endpoint", "必须引用本轮设计中存在"),
+    ("self link", "必须是不同的设计对象"),
+    ("invalid call target", "调用关系的两端必须是组件或接口"),
+    ("invalid read direction", "读写关系必须从组件或接口指向数据结构"),
+    ("duplicate link", "同一方向和类型的协作关系不能重复"),
+    ("unrelated requirement", "只能引用至少一个端点关联的需求"),
+    ("duplicate requirement", "不能重复引用需求"),
+])
+def test_collaboration_links_reject_invalid_structure(capacity_design, scenario, message):
+    links = capacity_design["collaboration_links"]
+    if scenario == "unknown endpoint":
+        links[0]["target"] = {"kind": "component", "key": "Unknown"}
+    elif scenario == "self link":
+        links[0]["target"] = links[0]["source"]
+    elif scenario == "invalid call target":
+        links[0]["target"] = links[1]["target"]
+    elif scenario == "invalid read direction":
+        links[1]["source"], links[1]["target"] = links[1]["target"], links[1]["source"]
+    elif scenario == "duplicate link":
+        links.append(links[0] | {"rationale": "同一方向的第二次描述"})
+    elif scenario == "unrelated requirement":
+        links[0]["requirement_ids"] = ["REQ-SECTION"]
+    else:
+        links[0]["requirement_ids"] = ["REQ-CAPACITY", "REQ-CAPACITY"]
+
+    with pytest.raises(ValidationError, match=message):
+        DesignDocument.model_validate(capacity_design)
 
 
 @pytest.mark.parametrize("scenario,message", [

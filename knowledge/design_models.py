@@ -1,5 +1,5 @@
 """仅需求启动的设计流程及模型输出契约。"""
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import Field, JsonValue, model_validator
 
@@ -67,6 +67,32 @@ class InterfaceDesign(DesignItem):
 class DataDesign(DesignItem):
     component_key: Key
     schema_definition: dict[str, JsonValue] = Field(min_length=1)
+
+
+class CollaborationEndpoint(RuntimeInput):
+    kind: Literal["component", "interface", "data_model"] = Field(title="本轮设计对象类型")
+    key: Key = Field(title="本轮设计对象标识")
+
+
+class CollaborationLink(RuntimeInput):
+    source: CollaborationEndpoint = Field(title="发起调用、读写或依赖的一方")
+    target: CollaborationEndpoint = Field(title="被调用、读写或依赖的一方")
+    type: Literal["calls", "reads", "writes", "depends_on"] = Field(title="协作关系类型")
+    rationale: Text = Field(title="说明该关系如何满足关联需求或设计依据")
+    requirement_ids: RequirementIds = Field(title="此关系服务的本轮需求标识")
+
+    @model_validator(mode="after")
+    def consistent_link(self):
+        if self.source == self.target:
+            raise ValueError("协作关系的两端必须是不同的设计对象")
+        if len(set(self.requirement_ids)) != len(self.requirement_ids):
+            raise ValueError("同一协作关系不能重复引用需求")
+        action_kinds = {"component", "interface"}
+        if self.type == "calls" and not {self.source.kind, self.target.kind}.issubset(action_kinds):
+            raise ValueError("调用关系的两端必须是组件或接口")
+        if self.type in {"reads", "writes"} and (self.source.kind not in action_kinds or self.target.kind != "data_model"):
+            raise ValueError("读写关系必须从组件或接口指向数据结构")
+        return self
 
 
 class TestPlan(DesignItem):
@@ -149,6 +175,7 @@ class DesignDocument(RuntimeInput):
     test_plan: list[TestPlan] = Field(default_factory=list, max_length=30)
     sequence_diagrams: list[SequenceDiagram] = Field(default_factory=list, max_length=6, title="业务时序图，可选")
     use_case_diagrams: list[UseCaseDiagram] = Field(default_factory=list, max_length=4, title="需求分析用例图，可选")
+    collaboration_links: list[CollaborationLink] = Field(default_factory=list, max_length=50, title="架构协作关系，可选")
 
     @model_validator(mode="after")
     def complete_and_consistent(self):
@@ -166,6 +193,19 @@ class DesignDocument(RuntimeInput):
         components = {item.key for item in self.components}
         if any(item.component_key not in components for item in [*self.interfaces, *self.data_models]):
             raise ValueError("接口和数据模型必须引用本次设计中存在的组件")
+        endpoint_groups = (("component", self.components), ("interface", self.interfaces), ("data_model", self.data_models))
+        nodes = {(kind, item.key): set(item.requirement_ids) for kind, items in endpoint_groups for item in items}
+        seen = set()
+        for link in self.collaboration_links:
+            source, target = (link.source.kind, link.source.key), (link.target.kind, link.target.key)
+            if source not in nodes or target not in nodes:
+                raise ValueError("协作关系必须引用本轮设计中存在的组件、接口或数据结构")
+            if not set(link.requirement_ids).issubset(nodes[source] | nodes[target]):
+                raise ValueError("协作关系只能引用至少一个端点关联的需求")
+            identity = (source, target, link.type)
+            if identity in seen:
+                raise ValueError("同一方向和类型的协作关系不能重复，请合并关联需求")
+            seen.add(identity)
         return self
 
 

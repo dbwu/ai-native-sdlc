@@ -5,6 +5,7 @@ import { request } from '../api/client'
 import { state, selectProject, notify } from '../store/workbench'
 import { fieldName, kinds, readable, relationshipTypes } from '../lib/display'
 import type { RecordData } from '../types'
+import ProjectDesignDiagrams from '../components/ProjectDesignDiagrams.vue'
 import StatusPill from '../components/StatusPill.vue'
 import RequirementDeliveries from '../components/RequirementDeliveries.vue'
 
@@ -289,6 +290,8 @@ async function check() {
       <button type="button" class="button secondary" @click="refresh">刷新知识</button>
       <button type="button" class="button secondary" @click="check">检查一致性</button>
     </div>
+    <ProjectDesignDiagrams v-if="state.initialized && pid" :key="pid" :project-id="pid"
+      :refresh-key="deliveryRefresh" :open-by-default="!selectedId"/>
     <div class="knowledge-workspace">
       <section class="knowledge-browser" aria-label="项目知识目录">
         <h3>知识目录</h3>

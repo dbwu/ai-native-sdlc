@@ -28,6 +28,7 @@ const questions = computed<RecordData[]>(() => detail.value?.questions || [])
 const design = computed(() => detail.value?.design)
 const diagrams = computed<DesignDiagram[]>(() => detail.value?.diagrams ?? [])
 const hasSequence = computed(() => diagrams.value.some(diagram => diagram.kind === 'sequence'))
+const hasCollaboration = computed(() => diagrams.value.some(diagram => diagram.kind === 'collaboration'))
 const canAct = computed(() => !busy.value && !!actor.value.trim() && !!reason.value.trim())
 const terminal = computed(() => ['COMPLETED', 'CANCELLED'].includes(flow.value?.status))
 const canGenerate = computed(() => ['READY', 'BLOCKED'].includes(flow.value?.status) || (flow.value?.status === 'REVIEW_PENDING' && proposal.value?.status === 'rejected'))
@@ -266,9 +267,11 @@ onBeforeUnmount(() => { ++generation; ++detailGeneration; stopPoll() })
         </section>
 
         <section v-if="design" class="panel project-panel">
-          <h3>模型生成的候选设计</h3><p>{{ design.summary }}</p>
-          <section v-if="diagrams.length" aria-label="设计图示">
+          <h3>{{ designConfirmed ? '已确认的设计' : '模型生成的候选设计' }}</h3><p>{{ design.summary }}</p>
+          <section aria-label="设计图示">
             <h4 class="studio-section-title">设计图示</h4>
+            <p v-if="!hasCollaboration" class="section-label">{{ designConfirmed ? '这版已确认设计没有记录协作关系。' : '本轮候选设计未提出协作关系。' }}</p>
+            <p v-else-if="!designConfirmed" class="info-box">请核对协作关系的方向、设计依据和关联需求。确认设计后，这些关系会纳入正式设计。</p>
             <p v-if="!hasSequence" class="section-label">本次设计没有记录业务时序图。</p>
             <DiagramPreview v-for="(diagram, index) in diagrams" :key="index" :diagram="diagram"/>
           </section>

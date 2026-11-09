@@ -2,7 +2,15 @@
 import re
 
 
-def design_diagrams(design, requirement_id=None):
+COLLABORATION_NODES = {
+    'component': ('components', 'ArchitectureComponent'),
+    'interface': ('interfaces', 'Interface'),
+    'data_model': ('data_models', 'DataModel'),
+}
+COLLABORATION_LABELS = {'calls': '调用', 'reads': '读取', 'writes': '写入', 'depends_on': '依赖'}
+
+
+def design_diagrams(design, requirement_id=None, *, requirements=()):
     if not design or design.get('questions'):
         return []
 
@@ -31,30 +39,91 @@ def design_diagrams(design, requirement_id=None):
                  for message in sequence['messages']]
         diagrams.append({'kind': 'sequence', 'title': sequence['title'], 'nodes': nodes, 'edges': edges})
 
-    children = [(kind, item) for kind, group in (('Interface', 'interfaces'), ('DataModel', 'data_models'))
-                for item in design[group] if relevant(item)]
-    owners = {item['component_key'] for _, item in children}
-    nodes, edges, component_ids = [], [], {}
-    for component in design['components']:
-        if relevant(component) or component['key'] in owners:
-            node_id = f'n{len(nodes) + 1}'
-            component_ids[component['key']] = node_id
-            nodes.append({'id': node_id, 'kind': 'ArchitectureComponent', 'label': component['name']})
-    for kind, child in children:
-        node_id = f'n{len(nodes) + 1}'
-        nodes.append({'id': node_id, 'kind': kind, 'label': child['name']})
-        edges.append({'source': component_ids[child['component_key']], 'target': node_id, 'label': '包含'})
-    if nodes:
-        diagrams.append({'kind': 'architecture', 'title': '架构图', 'nodes': nodes, 'edges': edges})
+    requirements = [item for item in requirements if requirement_id is None or str(item['id']) == str(requirement_id)]
+    architecture = _architecture(design, relevant, requirements)
+    if architecture:
+        diagrams.append(architecture)
+    collaboration = _collaboration(design, relevant, requirements)
+    if collaboration:
+        diagrams.append(collaboration)
     for diagram in diagrams:
         diagram['mermaid'] = '\n'.join(mermaid_lines(diagram))
     return diagrams
 
 
+def _architecture(design, relevant, requirements):
+    children = [(kind, item) for kind, group in (('Interface', 'interfaces'), ('DataModel', 'data_models'))
+                for item in design[group] if relevant(item)]
+    owned_requirements = {}
+    for _, child in children:
+        owned_requirements.setdefault(child['component_key'], set()).update(child['requirement_ids'])
+    components = [item for item in design['components'] if relevant(item) or item['key'] in owned_requirements]
+    if not components:
+        return None
+
+    nodes, edges = [], []
+
+    def add_node(kind, label, **attributes):
+        node_id = f'n{len(nodes) + 1}'
+        nodes.append({'id': node_id, 'kind': kind, 'label': label, **attributes})
+        return node_id
+
+    requirement_nodes = {str(item['id']): add_node('Requirement', f'{item["name"]} · v{item["version"]}')
+                         for item in requirements}
+    component_nodes = {}
+    for component in components:
+        key = component['key']
+        node_id = add_node('ArchitectureComponent', component['name'],
+                           detail=component.get('responsibility') or component.get('description') or '')
+        component_nodes[key] = node_id
+        direct = set(component['requirement_ids'])
+        for requirement_id, source in requirement_nodes.items():
+            if requirement_id in direct:
+                label = '由其负责'
+            elif requirement_id in owned_requirements.get(key, ()):
+                label = '关联产物归属'
+            else:
+                continue
+            edges.append({'source': source, 'target': node_id, 'label': label})
+    for kind, child in children:
+        node_id = add_node(kind, child['name'])
+        edges.append({'source': component_nodes[child['component_key']], 'target': node_id, 'label': '包含'})
+    return {'kind': 'architecture', 'title': '职责图', 'nodes': nodes, 'edges': edges}
+
+
+def _collaboration(design, relevant, requirements):
+    links = [link for link in design.get('collaboration_links', []) if relevant(link)]
+    if not links:
+        return None
+    labels = {str(item['id']): f'{item["name"]} · v{item["version"]}' for item in requirements}
+    used = {(endpoint['kind'], endpoint['key']) for link in links for endpoint in (link['source'], link['target'])}
+    nodes, ids = [], {}
+    for kind, (group, entity_kind) in COLLABORATION_NODES.items():
+        for item in design[group]:
+            ref = (kind, item['key'])
+            if ref in used:
+                node_id = f'n{len(nodes) + 1}'
+                ids[ref] = node_id
+                nodes.append({'id': node_id, 'kind': entity_kind, 'label': item['name']})
+    edges = []
+    for link in links:
+        source, target = link['source'], link['target']
+        edges.append({'source': ids[(source['kind'], source['key'])], 'target': ids[(target['kind'], target['key'])],
+                      'label': COLLABORATION_LABELS[link['type']], 'rationale': link['rationale'],
+                      'requirements': [labels[ref] for ref in link['requirement_ids'] if ref in labels]})
+    return {'kind': 'collaboration', 'title': '协作图', 'nodes': nodes, 'edges': edges}
+
+
 # 只生成固定 Mermaid 语法。标签内替换控制字符和分隔符，模型无法注入语句、链接或 HTML。
 _DELIMITERS = str.maketrans('`<>"\'[]{}()|;#\\&%:', '｀＜＞＂＇［］｛｝（）｜；＃＼＆％：')
 _END_LETTERS = str.maketrans('eEnNdD', 'ｅＥｎＮｄＤ')
-_NODE_LABELS = {'ArchitectureComponent': '组件', 'Interface': '接口', 'DataModel': '数据结构', 'Actor': '角色'}
+_NODE_LABELS = {'Requirement': '需求', 'ArchitectureComponent': '组件', 'Interface': '接口', 'DataModel': '数据结构', 'Actor': '角色'}
+_ARCHITECTURE_STYLES = {
+    'Requirement': ('req', '#eaf3fa', '#5685a8'),
+    'ArchitectureComponent': ('component', '#eef7ef', '#5d9074'),
+    'Interface': ('interface', '#fff7e8', '#ad7e39'),
+    'DataModel': ('data', '#f3effc', '#8b79a9'),
+}
 
 
 def _mermaid_label(value):
@@ -76,5 +145,20 @@ def mermaid_lines(diagram):
             label = f'{_NODE_LABELS[node["kind"]]}：{label}'
         shape = f'(["{label}"])' if node['kind'] == 'UseCase' else f'["{label}"]'
         nodes.append(f'    {node["id"]}{shape}')
-    return ['flowchart LR', *nodes,
-            *[f'    {edge["source"]} {arrow}|{_mermaid_label(edge["label"])}| {edge["target"]}' for edge in diagram['edges']]]
+    lines = ['flowchart LR', *nodes]
+    if diagram['kind'] == 'collaboration':
+        # 同方向的多种关系共用一根连线，逐条依据在图下保留。
+        grouped = {}
+        for edge in diagram['edges']:
+            grouped.setdefault((edge['source'], edge['target']), []).append(edge['label'])
+        for (source, target), labels in grouped.items():
+            lines.append(f'    {source} {arrow}|{_mermaid_label(" / ".join(labels))}| {target}')
+    else:
+        lines.extend(f'    {edge["source"]} {arrow}|{_mermaid_label(edge["label"])}| {edge["target"]}' for edge in diagram['edges'])
+    if diagram['kind'] in {'architecture', 'collaboration'}:
+        for kind, (class_name, fill, stroke) in _ARCHITECTURE_STYLES.items():
+            ids = [node['id'] for node in diagram['nodes'] if node['kind'] == kind]
+            if ids:
+                lines.append(f'    classDef {class_name} fill:{fill},stroke:{stroke},color:#193247')
+                lines.append(f'    class {",".join(ids)} {class_name}')
+    return lines

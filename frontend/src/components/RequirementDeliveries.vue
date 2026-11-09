@@ -49,6 +49,7 @@ const diagrams = computed(() => delivery.value?.design?.diagrams ?? [])
 const useCaseDiagrams = computed(() => diagrams.value.filter(diagram => diagram.kind === 'use_case'))
 const designDiagrams = computed(() => diagrams.value.filter(diagram => diagram.kind !== 'use_case'))
 const hasSequence = computed(() => designDiagrams.value.some(diagram => diagram.kind === 'sequence'))
+const hasCollaboration = computed(() => designDiagrams.value.some(diagram => diagram.kind === 'collaboration'))
 const currentRequirement = computed(() => {
   const latest = versions.value[0]
   return latest && latest.version === delivery.value?.requirement.version ? latest : null
@@ -168,6 +169,7 @@ function changeDesign(event: Event) {
       </section>
       <section v-if="delivery.design" aria-label="设计图示">
         <h4>设计图示</h4>
+        <p v-if="!hasCollaboration" class="section-label">这版已确认设计没有记录本需求的协作关系。</p>
         <p v-if="!hasSequence" class="section-label">该需求在本次设计中没有记录业务时序图。</p>
         <DiagramPreview v-for="(diagram, index) in designDiagrams" :key="index" :diagram="diagram"/>
       </section>

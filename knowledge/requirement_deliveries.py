@@ -87,9 +87,23 @@ def _diagram_blocks(lines, diagrams):
         sequence = diagram['kind'] == 'sequence'
         use_case = diagram['kind'] == 'use_case'
         title = f'业务时序图：{_text(diagram["title"])}' if sequence else _text(diagram['title'])
-        lines.extend(['', f'### {title}', '', '```mermaid', diagram['mermaid'], '```', ''])
+        lines.extend(['', f'### {title}', ''])
+        if diagram['kind'] == 'architecture':
+            lines.extend(['从左侧需求读起，先看哪个组件负责，再看该组件包含的接口与数据结构。',
+                          '交互顺序请看业务时序图。', ''])
+        elif diagram['kind'] == 'collaboration':
+            lines.extend(['箭头指向调用、读写或依赖的对象。以下是已确认的设计关系，处理先后请看业务时序图。', ''])
+        lines.extend(['```mermaid', diagram['mermaid'], '```', ''])
         names = {node['id']: node['label'] for node in diagram['nodes']}
-        if use_case:
+        if diagram['kind'] == 'architecture':
+            lines.extend(['**组件职责**', ''])
+            for node in diagram['nodes']:
+                if node['kind'] == 'ArchitectureComponent':
+                    lines.append(f'- **{_text(node["label"])}**：{_text(node.get("detail") or "此设计未填写职责说明。")}')
+            lines.extend(['', '**关联关系**', ''])
+        elif diagram['kind'] == 'collaboration':
+            lines.extend(['**协作关系与设计依据**', ''])
+        elif use_case:
             lines.extend(['角色：' + '、'.join(_text(node['label']) for node in diagram['nodes'] if node['kind'] == 'Actor'),
                           '', '用例：' + '、'.join(_text(node['label']) for node in diagram['nodes'] if node['kind'] == 'UseCase'), ''])
         else:
@@ -98,6 +112,10 @@ def _diagram_blocks(lines, diagrams):
             marker = f'{index}.' if sequence else '-'
             connector = '—' if use_case else '→'
             lines.append(f'{marker} {_text(names[edge["source"]])} {connector} {_text(names[edge["target"]])}：{_text(edge["label"])}')
+            if diagram['kind'] == 'collaboration':
+                lines.append(f'  - 设计依据：{_text(edge["rationale"])}')
+                if edge['requirements']:
+                    lines.append(f'  - 关联需求：{_text("、".join(edge["requirements"]))}')
 
 
 def _design_document(requirement, flow, artifacts, inputs, diagrams):
@@ -108,6 +126,8 @@ def _design_document(requirement, flow, artifacts, inputs, diagrams):
     lines.extend(['', '## 设计图示', ''])
     if not any(diagram['kind'] == 'sequence' for diagram in diagrams):
         lines.append('此设计没有记录本需求的业务时序图。')
+    if not any(diagram['kind'] == 'collaboration' for diagram in diagrams):
+        lines.append('此设计没有记录本需求的协作关系。')
     _diagram_blocks(lines, [diagram for diagram in diagrams if diagram['kind'] != 'use_case'])
     _bullets(lines, '本轮设计假设', design.get('assumptions', []), '本轮没有记录设计假设。')
     _bullets(lines, '本轮后续事项', design.get('deferred_items', []), '本轮没有记录后续事项。')
@@ -181,6 +201,32 @@ class RequirementDeliveries:
     def __init__(self, database_url):
         self.database_url = database_url
 
+    def latest_diagrams(self, project_id):
+        with connect(self.database_url) as conn:
+            conn.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+            if not conn.execute("SELECT 1 FROM entity WHERE id=%s AND kind='Project'", (project_id,)).fetchone():
+                raise KnowledgeError('未找到当前项目', 404)
+            rows = conn.execute("""WITH latest AS (
+                SELECT DISTINCT ON (req.id) req.id AS requirement_id, ref.version AS requirement_version,
+                       rev.document->>'name' AS requirement_name, f.id AS design_id,
+                       f.recorded_at AS confirmed_at, f.state->'design' AS design
+                FROM current_design_flows f
+                CROSS JOIN LATERAL jsonb_to_recordset(f.definition->'requirements') AS ref(id uuid, version integer)
+                JOIN entity req ON req.id=ref.id AND req.project_id=f.project_id AND req.kind='Requirement'
+                JOIN entity_revision rev ON rev.entity_id=req.id AND rev.version=ref.version
+                WHERE f.project_id=%s AND f.status='COMPLETED'
+                ORDER BY req.id, ref.version DESC, f.recorded_at DESC, f.id
+            ) SELECT * FROM latest ORDER BY confirmed_at DESC, design_id, requirement_id""", (project_id,)).fetchall()
+        entries = []
+        for row in rows:
+            requirement = {'id': row['requirement_id'], 'name': row['requirement_name'], 'version': row['requirement_version']}
+            entries.append({
+                'requirement': {'entity_id': requirement['id'], 'name': requirement['name'], 'version': requirement['version']},
+                'design_id': row['design_id'], 'confirmed_at': row['confirmed_at'],
+                'diagrams': design_diagrams(row['design'], requirement['id'], requirements=[requirement]),
+            })
+        return {'entries': entries}
+
     def read(self, project_id, requirement_id, version, design_id=None, *, select_default=True):
         with connect(self.database_url) as conn:
             conn.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
@@ -210,7 +256,7 @@ class RequirementDeliveries:
             selected = _design_info(flow)
             if not any(choice['id'] == selected['id'] for choice in choices):
                 choices.append(selected.copy())
-            diagrams = design_diagrams(flow['state']['design'], requirement_id)
+            diagrams = design_diagrams(flow['state']['design'], requirement_id, requirements=[requirement])
             selected.update(shared_requirement_count=len(flow['definition']['requirements']), diagrams=diagrams, artifacts=[
                 {field: artifact[field] for field in ('id', 'kind', 'name', 'version', 'status', 'description')} for artifact in artifacts])
             design_document = _document(project_id, 'design', requirement, flow, _design_document(requirement, flow, artifacts, inputs, diagrams))

@@ -12,7 +12,7 @@ from psycopg.types.json import Jsonb
 from pydantic import ValidationError
 
 from .db import connect
-from .design_diagrams import design_diagrams
+from .design_diagrams import COLLABORATION_NODES, design_diagrams
 from .design_models import AnswerSubmission, ConfirmedScopeDesign, DesignAction, DesignDocument, DesignFlowCreate
 from . import model_gateway
 from .models import EntityCreate, RelationCreate
@@ -135,11 +135,12 @@ class DesignService:
             state, definition = flow['state'], flow['definition']
             def records(refs):
                 return [KS._get(conn, 'entity', UUID(ref['id']), ref['version']) for ref in refs]
+            requirements = records(definition['requirements'])
             jobs = self._generation_history(conn, flow_id, state['answers'])
             history = conn.execute('SELECT * FROM design_flow_event WHERE flow_id=%s ORDER BY version DESC LIMIT 100', (flow_id,)).fetchall()
-            return {'flow': flow, 'requirements': records(definition['requirements']), 'context': records(definition['input_knowledge']),
+            return {'flow': flow, 'requirements': requirements, 'context': records(definition['input_knowledge']),
                     'design': state['design'], 'questions': state['questions'], 'answers': state['answers'],
-                    'diagrams': design_diagrams(state['design']),
+                    'diagrams': design_diagrams(state['design'], requirements=requirements),
                     'assumptions': state['assumptions'], 'proposal': self._proposal(conn, state),
                     'jobs': jobs, 'history': history, 'model_config': model_gateway.public_model_config()}
 
@@ -295,7 +296,7 @@ class DesignService:
         design = model.model_validate(document)
         requirements = {ref['id'] for ref in flow['definition']['requirements']}
         items = [*design.questions, *design.components, *design.interfaces, *design.data_models,
-                 *design.test_plan, *design.sequence_diagrams, *design.use_case_diagrams]
+                 *design.test_plan, *design.sequence_diagrams, *design.use_case_diagrams, *design.collaboration_links]
         for item in items:
             if not set(item.requirement_ids) <= requirements:
                 raise KnowledgeError('模型设计引用了未选入本流程的需求，未发布提案')
@@ -336,11 +337,27 @@ class DesignService:
             attributes={'category': 'analysis', 'uri': provenance['source_uri'], 'revision': trace['output_sha256'], 'extensions': trace})
         operations = [{'op': 'create_entity', 'id': str(evidence_id), 'data': evidence.model_dump(mode='json')}]
         mapping, refs, components = [], [], {}
+        requirements = {ref['id']: ref['version'] for ref in flow['definition']['requirements']}
+        nodes = {(endpoint_kind, item['key']): (kind, item['name'])
+                 for endpoint_kind, (group, kind) in COLLABORATION_NODES.items() for item in design[group]}
+        outgoing = defaultdict(list)
+        for link in design.get('collaboration_links', []):
+            source, target = link['source'], link['target']
+            source_kind, _ = nodes[(source['kind'], source['key'])]
+            target_kind, target_name = nodes[(target['kind'], target['key'])]
+            outgoing[(source_kind, source['key'])].append({
+                'type': link['type'], 'target_id': str(uuid5(flow_id, target_kind+':'+target['key'])),
+                'target_kind': target_kind, 'target_name': target_name, 'target_version': 1, 'rationale': link['rationale'],
+                'requirements': [{'id': ref, 'version': requirements[ref]} for ref in link['requirement_ids']],
+            })
         for group, kind in [('components', 'ArchitectureComponent'), ('interfaces', 'Interface'), ('data_models', 'DataModel'), ('test_plan', 'TestCase')]:
             for item in design[group]:
                 record_id = uuid5(flow_id, kind+':'+item['key'])
                 extensions = {'design_key': item['key'], 'requirement_ids': item['requirement_ids'],
                               'generation_id': str(job['id']), 'implementation_status': 'planned'}
+                links = outgoing.get((kind, item['key']))
+                if links:
+                    extensions['collaboration_links'] = links
                 if group == 'components':
                     attrs = {'responsibility': item['responsibility'], 'extensions': extensions}
                     components[item['key']] = record_id
@@ -355,7 +372,6 @@ class DesignService:
                 operations.append({'op': 'create_entity', 'id': str(record_id), 'data': body.model_dump(mode='json')})
                 mapping.append({'key': kind+':'+item['key'], 'entity_id': str(record_id), 'version': 1, 'resolution': 'new'})
                 refs.append((record_id, item, kind))
-        requirements = {ref['id']: ref['version'] for ref in flow['definition']['requirements']}
         def edge(kind, source, target, source_version, target_version, rationale):
             body = RelationCreate(type=kind, source_id=source, target_id=target, source_version=source_version,
                                   target_version=target_version, rationale=rationale, provenance=provenance)

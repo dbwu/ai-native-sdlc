@@ -20,6 +20,10 @@ def workbench_router(url_provider):
     def projects(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)):
         return service().projects(limit, offset)
 
+    @router.get('/projects/{project_id}/design-diagrams', summary='查看各需求最新已确认设计图表')
+    def latest_design_diagrams(project_id: UUID):
+        return RequirementDeliveries(url_provider()).latest_diagrams(project_id)
+
     @router.get('/projects/{project_id}/requirements/{requirement_id}/deliveries', summary='预览固定需求版本的交付文档')
     def requirement_deliveries(project_id: UUID, requirement_id: UUID, version: int = Query(ge=1),
                                design_id: UUID | None = None):
