@@ -12,6 +12,7 @@ from psycopg.types.json import Jsonb
 from pydantic import ValidationError
 
 from .db import connect
+from .design_diagrams import design_diagrams
 from .design_models import AnswerSubmission, ConfirmedScopeDesign, DesignAction, DesignDocument, DesignFlowCreate
 from . import model_gateway
 from .models import EntityCreate, RelationCreate
@@ -138,6 +139,7 @@ class DesignService:
             history = conn.execute('SELECT * FROM design_flow_event WHERE flow_id=%s ORDER BY version DESC LIMIT 100', (flow_id,)).fetchall()
             return {'flow': flow, 'requirements': records(definition['requirements']), 'context': records(definition['input_knowledge']),
                     'design': state['design'], 'questions': state['questions'], 'answers': state['answers'],
+                    'diagrams': design_diagrams(state['design']),
                     'assumptions': state['assumptions'], 'proposal': self._proposal(conn, state),
                     'jobs': jobs, 'history': history, 'model_config': model_gateway.public_model_config()}
 
@@ -292,7 +294,8 @@ class DesignService:
         model = ConfirmedScopeDesign if confirmed_context is not None else DesignDocument
         design = model.model_validate(document)
         requirements = {ref['id'] for ref in flow['definition']['requirements']}
-        items = [*design.questions, *design.components, *design.interfaces, *design.data_models, *design.test_plan]
+        items = [*design.questions, *design.components, *design.interfaces, *design.data_models,
+                 *design.test_plan, *design.sequence_diagrams, *design.use_case_diagrams]
         for item in items:
             if not set(item.requirement_ids) <= requirements:
                 raise KnowledgeError('模型设计引用了未选入本流程的需求，未发布提案')

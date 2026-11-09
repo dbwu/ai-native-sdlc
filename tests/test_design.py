@@ -309,7 +309,8 @@ def test_confirmed_scope_validates_blockers_and_preserves_previous_unanswered_qu
         assert current['jobs'][0]['answers'][0]['key'] == 'Third' and current['jobs'][1]['answers'] == []
 
 
-@pytest.mark.parametrize('invalid', ['unknown_requirement', 'missing_component', 'missing_test', 'foreign_component', 'extra_code_field', 'empty_contract', 'empty_data_model'])
+@pytest.mark.parametrize('invalid', ['unknown_requirement', 'missing_component', 'missing_test', 'foreign_component',
+                                    'extra_code_field', 'empty_contract', 'empty_data_model', 'foreign_diagram'])
 def test_invalid_model_output_never_becomes_a_proposal(client, db_url, project, requirement, monkeypatch, invalid):
     def model(context, schema, **kwargs):
         doc = document(context)
@@ -319,6 +320,10 @@ def test_invalid_model_output_never_becomes_a_proposal(client, db_url, project, 
         elif invalid == 'foreign_component': doc['interfaces'][0]['component_key'] = 'Other'
         elif invalid == 'empty_contract': doc['interfaces'][0]['contract'] = {}
         elif invalid == 'empty_data_model': doc['data_models'][0]['schema_definition'] = {}
+        elif invalid == 'foreign_diagram':
+            doc['use_case_diagrams'] = [{'title': '未选需求', 'requirement_ids': [str(uuid4())],
+                'actors': [{'key': 'A', 'name': '学生'}], 'use_cases': [{'key': 'B', 'name': '选课'}],
+                'associations': [{'actor': 'A', 'use_case': 'B'}]}]
         else: doc['source_code'] = 'print("已通过")'
         return returned(doc)
     monkeypatch.setattr(model_gateway, 'complete_design', model)

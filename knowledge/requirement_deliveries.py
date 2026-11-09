@@ -10,6 +10,7 @@ from psycopg.types.json import Jsonb
 
 from .db import connect
 from .design import DesignService
+from .design_diagrams import design_diagrams
 from .localization import LABELS
 from .semantics import KnowledgeError
 from .service import KnowledgeService as KS
@@ -57,7 +58,7 @@ def _metadata(kind, requirement, flow):
     return lines
 
 
-def _requirements_analysis(requirement, flow, inputs):
+def _requirements_analysis(requirement, flow, inputs, diagrams):
     lines = _metadata('requirements_analysis', requirement, flow)
     lines.extend(['', '## 需求说明', '', _text(requirement.get('description') or '未填写需求说明。')])
     _bullets(lines, '验收条件', requirement['attributes']['acceptance_criteria'], '该版本尚未记录验收条件。')
@@ -72,14 +73,42 @@ def _requirements_analysis(requirement, flow, inputs):
         _bullets(lines, '本轮共同设计依据', [f'{record["name"]} · v{record["version"]}' for record in inputs],
                  '本轮未绑定额外设计依据。')
         _bullets(lines, '本轮后续事项', flow['state']['design'].get('deferred_items', []), '本轮没有记录后续事项。')
+    use_cases = [diagram for diagram in diagrams if diagram['kind'] == 'use_case']
+    lines.extend(['', '## 用例图', ''])
+    if use_cases:
+        _diagram_blocks(lines, use_cases)
+    else:
+        lines.append('此需求版本没有已确认的用例图。')
     return lines
 
 
-def _design_document(requirement, flow, artifacts, inputs):
+def _diagram_blocks(lines, diagrams):
+    for diagram in diagrams:
+        sequence = diagram['kind'] == 'sequence'
+        use_case = diagram['kind'] == 'use_case'
+        title = f'业务时序图：{_text(diagram["title"])}' if sequence else _text(diagram['title'])
+        lines.extend(['', f'### {title}', '', '```mermaid', diagram['mermaid'], '```', ''])
+        names = {node['id']: node['label'] for node in diagram['nodes']}
+        if use_case:
+            lines.extend(['角色：' + '、'.join(_text(node['label']) for node in diagram['nodes'] if node['kind'] == 'Actor'),
+                          '', '用例：' + '、'.join(_text(node['label']) for node in diagram['nodes'] if node['kind'] == 'UseCase'), ''])
+        else:
+            lines.extend([('参与者：' if sequence else '节点：') + '、'.join(_text(name) for name in names.values()), ''])
+        for index, edge in enumerate(diagram['edges'], 1):
+            marker = f'{index}.' if sequence else '-'
+            connector = '—' if use_case else '→'
+            lines.append(f'{marker} {_text(names[edge["source"]])} {connector} {_text(names[edge["target"]])}：{_text(edge["label"])}')
+
+
+def _design_document(requirement, flow, artifacts, inputs, diagrams):
     lines = _metadata('design', requirement, flow)
     design = flow['state']['design']
     lines.extend(['', '## 本轮设计摘要', '', _text(design['summary'])])
     _bullets(lines, '本需求验收条件', requirement['attributes']['acceptance_criteria'], '该版本尚未记录验收条件。')
+    lines.extend(['', '## 设计图示', ''])
+    if not any(diagram['kind'] == 'sequence' for diagram in diagrams):
+        lines.append('此设计没有记录本需求的业务时序图。')
+    _diagram_blocks(lines, [diagram for diagram in diagrams if diagram['kind'] != 'use_case'])
     _bullets(lines, '本轮设计假设', design.get('assumptions', []), '本轮没有记录设计假设。')
     _bullets(lines, '本轮后续事项', design.get('deferred_items', []), '本轮没有记录后续事项。')
     lines.extend(['', '## 本轮共同设计依据'])
@@ -176,13 +205,15 @@ class RequirementDeliveries:
         choices = [_design_info(row) for row in designs]
         selected = None
         design_document = None
+        diagrams = []
         if flow:
             selected = _design_info(flow)
             if not any(choice['id'] == selected['id'] for choice in choices):
                 choices.append(selected.copy())
-            selected.update(shared_requirement_count=len(flow['definition']['requirements']), artifacts=[
+            diagrams = design_diagrams(flow['state']['design'], requirement_id)
+            selected.update(shared_requirement_count=len(flow['definition']['requirements']), diagrams=diagrams, artifacts=[
                 {field: artifact[field] for field in ('id', 'kind', 'name', 'version', 'status', 'description')} for artifact in artifacts])
-            design_document = _document(project_id, 'design', requirement, flow, _design_document(requirement, flow, artifacts, inputs))
-        analysis = _document(project_id, 'requirements_analysis', requirement, flow, _requirements_analysis(requirement, flow, inputs))
+            design_document = _document(project_id, 'design', requirement, flow, _design_document(requirement, flow, artifacts, inputs, diagrams))
+        analysis = _document(project_id, 'requirements_analysis', requirement, flow, _requirements_analysis(requirement, flow, inputs, diagrams))
         return {'requirement': requirement, 'designs': choices, 'design': selected,
                 'documents': {'requirements_analysis': analysis, 'design': design_document}}

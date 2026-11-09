@@ -6,6 +6,7 @@ import { notify, selectProject, state } from '../store/workbench'
 import { dateTime } from '../lib/display'
 import type { RecordData } from '../types'
 import DesignModelExchange from '../components/DesignModelExchange.vue'
+import DiagramPreview, { type DesignDiagram } from '../components/DiagramPreview.vue'
 import ProposalDiff from '../components/ProposalDiff.vue'
 import StatusPill from '../components/StatusPill.vue'
 
@@ -25,6 +26,8 @@ const requirements = computed(() => catalog.value.filter(e => e.kind === 'Requir
 const inputs = computed(() => catalog.value.filter(e => ['BusinessRule', 'Constraint', 'Decision', 'Domain'].includes(e.kind) && e.status !== 'archived'))
 const questions = computed<RecordData[]>(() => detail.value?.questions || [])
 const design = computed(() => detail.value?.design)
+const diagrams = computed<DesignDiagram[]>(() => detail.value?.diagrams ?? [])
+const hasSequence = computed(() => diagrams.value.some(diagram => diagram.kind === 'sequence'))
 const canAct = computed(() => !busy.value && !!actor.value.trim() && !!reason.value.trim())
 const terminal = computed(() => ['COMPLETED', 'CANCELLED'].includes(flow.value?.status))
 const canGenerate = computed(() => ['READY', 'BLOCKED'].includes(flow.value?.status) || (flow.value?.status === 'REVIEW_PENDING' && proposal.value?.status === 'rejected'))
@@ -264,6 +267,11 @@ onBeforeUnmount(() => { ++generation; ++detailGeneration; stopPoll() })
 
         <section v-if="design" class="panel project-panel">
           <h3>模型生成的候选设计</h3><p>{{ design.summary }}</p>
+          <section v-if="diagrams.length" aria-label="设计图示">
+            <h4 class="studio-section-title">设计图示</h4>
+            <p v-if="!hasSequence" class="section-label">本次设计没有记录业务时序图。</p>
+            <DiagramPreview v-for="(diagram, index) in diagrams" :key="index" :diagram="diagram"/>
+          </section>
           <div v-if="(detail?.assumptions || design.assumptions || []).length" class="info-box warning"><strong>需要审阅的设计假设</strong><ul><li v-for="item in detail?.assumptions || design.assumptions" :key="item">{{ item }}</li></ul><p>这些是假设，需随设计一并确认，不能视作已验证业务事实。</p></div>
           <div v-if="design.deferred_items?.length" class="info-box">
             <strong>后续事项</strong>

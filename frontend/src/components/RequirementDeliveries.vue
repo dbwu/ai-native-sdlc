@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { request } from '../api/client'
 import { dateTime, kinds } from '../lib/display'
 import type { RecordData } from '../types'
+import DiagramPreview, { type DesignDiagram } from './DiagramPreview.vue'
 import StatusPill from './StatusPill.vue'
 
 type DocumentKind = 'requirements_analysis' | 'design'
@@ -12,7 +13,7 @@ type DesignArtifact = { id: string; kind: string; name: string; version: number;
 type Delivery = {
   requirement: RecordData
   designs: DesignVersion[]
-  design: (DesignVersion & { shared_requirement_count: number; artifacts: DesignArtifact[] }) | null
+  design: (DesignVersion & { shared_requirement_count: number; artifacts: DesignArtifact[]; diagrams?: DesignDiagram[] }) | null
   documents: { requirements_analysis: DeliveryDocument; design: DeliveryDocument | null }
 }
 
@@ -44,6 +45,10 @@ const versionOptions = computed(() => {
   return [...options, { version: version.value }]
 })
 const document = computed(() => delivery.value?.documents[previewKind.value])
+const diagrams = computed(() => delivery.value?.design?.diagrams ?? [])
+const useCaseDiagrams = computed(() => diagrams.value.filter(diagram => diagram.kind === 'use_case'))
+const designDiagrams = computed(() => diagrams.value.filter(diagram => diagram.kind !== 'use_case'))
+const hasSequence = computed(() => designDiagrams.value.some(diagram => diagram.kind === 'sequence'))
 const currentRequirement = computed(() => {
   const latest = versions.value[0]
   return latest && latest.version === delivery.value?.requirement.version ? latest : null
@@ -156,6 +161,15 @@ function changeDesign(event: Event) {
             </details>
           </li>
         </ul>
+      </section>
+      <section v-if="useCaseDiagrams.length" aria-label="需求分析图示">
+        <h4>需求分析图示</h4>
+        <DiagramPreview v-for="(diagram, index) in useCaseDiagrams" :key="index" :diagram="diagram"/>
+      </section>
+      <section v-if="delivery.design" aria-label="设计图示">
+        <h4>设计图示</h4>
+        <p v-if="!hasSequence" class="section-label">该需求在本次设计中没有记录业务时序图。</p>
+        <DiagramPreview v-for="(diagram, index) in designDiagrams" :key="index" :diagram="diagram"/>
       </section>
       <div class="delivery-documents">
         <div class="inline-actions" aria-label="文档预览">

@@ -4,8 +4,10 @@ import json
 from urllib.error import HTTPError, URLError
 
 import pytest
+from pydantic import ValidationError
 
 from knowledge import model_gateway as gateway
+from knowledge.design_models import ConfirmedScopeDesign, DesignDocument, SequenceDiagram, UseCaseDiagram
 from knowledge.semantics import KnowledgeError
 
 
@@ -152,6 +154,97 @@ def test_confirmed_scope_design_uses_saved_answers_and_a_distinct_prompt(configu
     assert json.loads(body["messages"][1]["content"]) == {"context": context, "output_schema": schema}
     assert result["document"] == document
     assert result["trace"]["prompt_version"] == gateway.CONFIRMED_SCOPE_PROMPT_VERSION != gateway.PROMPT_VERSION
+
+
+@pytest.mark.parametrize("confirmed_scope,model", [(False, DesignDocument), (True, ConfirmedScopeDesign)])
+def test_model_can_return_structured_business_diagrams(configured, monkeypatch, confirmed_scope, model):
+    sequence = {
+        "title": "满员时拒绝新增选课",
+        "requirement_ids": ["REQ-CAPACITY"],
+        "participants": [{"key": "Student", "name": "学生"}, {"key": "Enrollment", "name": "选课服务"}],
+        "messages": [{"source": "Student", "target": "Enrollment", "label": "提交选课"},
+                     {"source": "Enrollment", "target": "Student", "label": "拒绝满员请求"}],
+    }
+    use_case = {
+        "title": "学生选课用例",
+        "requirement_ids": ["REQ-CAPACITY"],
+        "actors": [{"key": "Student", "name": "学生"}],
+        "use_cases": [{"key": "Enroll", "name": "提交选课"}],
+        "associations": [{"actor": "Student", "use_case": "Enroll"}],
+    }
+    design = {
+        "summary": "容量限制设计",
+        "components": [{"key": "Enrollment", "name": "选课服务", "requirement_ids": ["REQ-CAPACITY"],
+                        "responsibility": "检查教学班容量"}],
+        "test_plan": [{"key": "Capacity", "name": "满员时拒绝新增", "requirement_ids": ["REQ-CAPACITY"],
+                       "steps": ["提交选课"], "expected_result": "拒绝满员请求"}],
+    }
+    calls = install_transport(monkeypatch, response(design | {"sequence_diagrams": [sequence], "use_case_diagrams": [use_case]}))
+
+    result = gateway.complete_design({"requirements": [{"id": "REQ-CAPACITY"}]}, model.model_json_schema(),
+                                     confirmed_scope=confirmed_scope)
+
+    prompt = json.loads(calls[0][0].data)["messages"][0]["content"]
+    assert "每张图只说明一条路径" in prompt and "不专门为画图提出澄清问题" in prompt
+    assert "系统边界外已有依据的业务角色" in prompt and "不得虚构业务角色、职责或操作" in prompt
+    parsed = model.model_validate(result["document"])
+    assert parsed.sequence_diagrams[0].model_dump() == sequence
+    assert parsed.use_case_diagrams[0].model_dump() == use_case
+    previous = model.model_validate(design)
+    assert previous.sequence_diagrams == [] and previous.use_case_diagrams == []
+
+
+@pytest.mark.parametrize("scenario,message", [
+    ("duplicate participant", "参与者标识不能重复"),
+    ("unknown receiver", "必须引用本图定义的参与者"),
+    ("duplicate requirement", "不能重复引用需求"),
+    ("diagram code", "Extra inputs are not permitted"),
+    ("multiline message", "String should match pattern"),
+])
+def test_sequence_diagram_rejects_invalid_structure(scenario, message):
+    diagram = {
+        "title": "发起选课",
+        "requirement_ids": ["REQ-CAPACITY"],
+        "participants": [{"key": "Student", "name": "学生"}, {"key": "Enrollment", "name": "选课服务"}],
+        "messages": [{"source": "Student", "target": "Enrollment", "label": "提交选课"}],
+    }
+    if scenario == "duplicate participant":
+        diagram["participants"][1]["key"] = "Student"
+    elif scenario == "unknown receiver":
+        diagram["messages"][0]["target"] = "Unknown"
+    elif scenario == "duplicate requirement":
+        diagram["requirement_ids"].append("REQ-CAPACITY")
+    elif scenario == "diagram code":
+        diagram["mermaid"] = "sequenceDiagram\nStudent->>Enrollment: 提交选课"
+    else:
+        diagram["messages"][0]["label"] = "提交选课\n等待确认"
+
+    with pytest.raises(ValidationError, match=message):
+        SequenceDiagram.model_validate(diagram)
+
+
+@pytest.mark.parametrize("scenario,message", [
+    ("unknown action", "必须引用本图的参与者和用例"),
+    ("unlinked actor", "都必须出现在关联中"),
+    ("duplicate association", "不能重复声明同一关联"),
+])
+def test_use_case_diagram_validates_associations(scenario, message):
+    diagram = {
+        "title": "学生选课用例",
+        "requirement_ids": ["REQ-CAPACITY"],
+        "actors": [{"key": "Student", "name": "学生"}],
+        "use_cases": [{"key": "Enroll", "name": "提交选课"}],
+        "associations": [{"actor": "Student", "use_case": "Enroll"}],
+    }
+    if scenario == "unknown action":
+        diagram["associations"][0]["use_case"] = "Unknown"
+    elif scenario == "unlinked actor":
+        diagram["actors"].append({"key": "Advisor", "name": "导师"})
+    else:
+        diagram["associations"] *= 2
+
+    with pytest.raises(ValidationError, match=message):
+        UseCaseDiagram.model_validate(diagram)
 
 
 def test_design_exchange_records_actual_request_and_reply_without_http_metadata(configured, monkeypatch):

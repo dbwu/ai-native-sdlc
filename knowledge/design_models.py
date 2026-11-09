@@ -8,6 +8,7 @@ from .runtime_models import RuntimeInput
 
 Key = Annotated[str, Field(min_length=1, max_length=80, pattern=r'^[A-Za-z][A-Za-z0-9_-]*$')]
 RequirementIds = Annotated[list[str], Field(min_length=1, max_length=20)]
+DiagramLabel = Annotated[str, Field(min_length=1, max_length=160, pattern=r'^[^\x00-\x1f\x7f\u2028\u2029]+$')]
 
 
 class DesignFlowCreate(RuntimeInput):
@@ -73,6 +74,70 @@ class TestPlan(DesignItem):
     expected_result: Text
 
 
+class SequenceParticipant(RuntimeInput):
+    key: Key = Field(title="参与者标识")
+    name: DiagramLabel = Field(max_length=96, title="参与者名称")
+
+
+class SequenceMessage(RuntimeInput):
+    source: Key = Field(title="发送方标识")
+    target: Key = Field(title="接收方标识")
+    label: DiagramLabel = Field(title="单行交互说明")
+
+
+class SequenceDiagram(RuntimeInput):
+    title: DiagramLabel = Field(max_length=120, title="业务交互标题")
+    requirement_ids: RequirementIds = Field(title="图所解释的需求标识")
+    participants: list[SequenceParticipant] = Field(min_length=2, max_length=8, title="参与交互的角色、组件或外部系统")
+    messages: list[SequenceMessage] = Field(min_length=1, max_length=20, title="按发生顺序记录的交互")
+
+    @model_validator(mode="after")
+    def consistent_participants(self):
+        keys = {participant.key for participant in self.participants}
+        if len(keys) != len(self.participants):
+            raise ValueError("同一时序图的参与者标识不能重复")
+        if any(message.source not in keys or message.target not in keys for message in self.messages):
+            raise ValueError("时序图交互必须引用本图定义的参与者")
+        if len(set(self.requirement_ids)) != len(self.requirement_ids):
+            raise ValueError("同一时序图不能重复引用需求")
+        return self
+
+
+class UseCaseNode(RuntimeInput):
+    key: Key = Field(title="图内标识")
+    name: DiagramLabel = Field(max_length=96, title="参与者或用例名称")
+
+
+class UseCaseAssociation(RuntimeInput):
+    actor: Key = Field(title="参与者标识")
+    use_case: Key = Field(title="用例标识")
+
+
+class UseCaseDiagram(RuntimeInput):
+    title: DiagramLabel = Field(max_length=120, title="需求用例图标题")
+    requirement_ids: RequirementIds = Field(title="图所解释的需求标识")
+    actors: list[UseCaseNode] = Field(min_length=1, max_length=8, title="系统边界外的业务参与者")
+    use_cases: list[UseCaseNode] = Field(min_length=1, max_length=12, title="参与者通过系统达成的目标")
+    associations: list[UseCaseAssociation] = Field(min_length=1, max_length=24, title="参与者与用例的关联")
+
+    @model_validator(mode="after")
+    def consistent_associations(self):
+        actors = {actor.key for actor in self.actors}
+        cases = {case.key for case in self.use_cases}
+        if len(actors) != len(self.actors) or len(cases) != len(self.use_cases):
+            raise ValueError("同一用例图内同类节点标识不能重复")
+        pairs = {(item.actor, item.use_case) for item in self.associations}
+        if len(pairs) != len(self.associations):
+            raise ValueError("同一用例图不能重复声明同一关联")
+        if any(actor not in actors or case not in cases for actor, case in pairs):
+            raise ValueError("用例图关联必须引用本图的参与者和用例")
+        if {actor for actor, _ in pairs} != actors or {case for _, case in pairs} != cases:
+            raise ValueError("用例图中的参与者和用例都必须出现在关联中")
+        if len(set(self.requirement_ids)) != len(self.requirement_ids):
+            raise ValueError("同一用例图不能重复引用需求")
+        return self
+
+
 class DesignDocument(RuntimeInput):
     summary: Text
     questions: list[Clarification] = Field(default_factory=list, max_length=20)
@@ -82,6 +147,8 @@ class DesignDocument(RuntimeInput):
     interfaces: list[InterfaceDesign] = Field(default_factory=list, max_length=20)
     data_models: list[DataDesign] = Field(default_factory=list, max_length=20)
     test_plan: list[TestPlan] = Field(default_factory=list, max_length=30)
+    sequence_diagrams: list[SequenceDiagram] = Field(default_factory=list, max_length=6, title="业务时序图，可选")
+    use_case_diagrams: list[UseCaseDiagram] = Field(default_factory=list, max_length=4, title="需求分析用例图，可选")
 
     @model_validator(mode="after")
     def complete_and_consistent(self):

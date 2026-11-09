@@ -74,7 +74,20 @@ def test_course_capacity_confirmed_deliveries_pin_versions_and_scope(client, db_
             'test_plan': [
                 {'key': 'CapacityTest', 'name': '满员拒绝新增', 'steps': ['提交新选课'], 'expected_result': '人数不变', 'requirement_ids': refs},
                 {'key': 'OtherTest', 'name': '其他需求测试', 'steps': ['处理其他事项'], 'expected_result': '完成', 'requirement_ids': [other['id']]},
-            ], 'assumptions': ['事务内维护人数'], 'deferred_items': ['候补另行设计']})
+            ], 'assumptions': ['事务内维护人数'], 'deferred_items': ['候补另行设计'],
+            'sequence_diagrams': [
+                {'title': '满员时拒绝新增', 'requirement_ids': refs,
+                 'participants': [{'key': 'Student', 'name': '学生'}, {'key': 'Service', 'name': '选课服务'}],
+                 'messages': [{'source': 'Student', 'target': 'Service', 'label': '提交选课'},
+                              {'source': 'Service', 'target': 'Student', 'label': '返回满员错误'}]},
+                {'title': '另一需求专用时序', 'requirement_ids': [other['id']],
+                 'participants': [{'key': 'Student', 'name': '学生'}, {'key': 'Service', 'name': '选课服务'}],
+                 'messages': [{'source': 'Student', 'target': 'Service', 'label': '查看课表'}]},
+            ], 'use_case_diagrams': [
+                {'title': '容量限制用例', 'requirement_ids': refs, 'actors': [{'key': 'Student', 'name': '学生'}],
+                 'use_cases': [{'key': 'Enroll', 'name': '选修教学班'}],
+                 'associations': [{'actor': 'Student', 'use_case': 'Enroll'}]},
+            ]})
 
     monkeypatch.setattr(model_gateway, 'complete_design', complete)
     for expected_state in ('NEEDS_CLARIFICATION', 'REVIEW_PENDING'):
@@ -92,6 +105,7 @@ def test_course_capacity_confirmed_deliveries_pin_versions_and_scope(client, db_
             current = response.json()
 
     assert preview(client, url, capacity['version'])['design'] is None
+    assert {diagram['kind'] for diagram in current['diagrams']} == {'use_case', 'sequence', 'architecture'}
     assert client.get(url, params={'version': capacity['version'], 'design_id': flow_id}).status_code == 409
     current = action(client, action(client, current, 'validate'), 'commit')
     assert preview(client, url, capacity['version'])['design'] is None
@@ -105,6 +119,12 @@ def test_course_capacity_confirmed_deliveries_pin_versions_and_scope(client, db_
     assert '即使满员也返回原选课记录' in analysis['markdown'] and '另一需求的独有答复' not in analysis['markdown']
     assert '防止并发超额' in design['markdown'] and '不属于容量需求的组件' not in design['markdown']
     assert '候补另行设计' in design['markdown'] and '测试计划（设计阶段）' in design['markdown']
+    diagrams = {item['kind']: item for item in delivery['design']['diagrams']}
+    assert set(diagrams) == {'use_case', 'sequence', 'architecture'}
+    assert '另一需求专用时序' not in design['markdown'] and '另一需求专用时序' not in analysis['markdown']
+    assert f'```mermaid\n{diagrams["use_case"]["mermaid"]}\n```' in analysis['markdown']
+    for kind in ('sequence', 'architecture'):
+        assert f'```mermaid\n{diagrams[kind]["mermaid"]}\n```' in design['markdown']
     for doc in (analysis, design, standalone):
         response = client.get(doc['download_url'])
         assert response.status_code == 200, response.text
