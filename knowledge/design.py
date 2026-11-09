@@ -144,7 +144,9 @@ class DesignService:
     @staticmethod
     def _generation_history(conn, flow_id, answers):
         jobs = conn.execute('''SELECT id,flow_id,version,status,actor,reason,created_at,updated_at,finished_at,
-            diagnostic,trace,result,COALESCE(request->>'generation_mode','standard') AS generation_mode
+            diagnostic,trace,result - 'model_exchange' AS result,
+            COALESCE(jsonb_typeof(result->'model_exchange') = 'object', false) AS has_model_exchange,
+            COALESCE(request->>'generation_mode','standard') AS generation_mode
             FROM current_design_generations WHERE flow_id=%s ORDER BY created_at DESC,id LIMIT 20''', (flow_id,)).fetchall()
         answers_by_job = defaultdict(list)
         for answer in answers:
@@ -162,6 +164,16 @@ class DesignService:
             job['questions'] = job['result'].get('questions', legacy_questions.get(job_id, []))
             job['answers'] = answers_by_job[job_id]
         return jobs
+
+    def model_exchange(self, flow_id, job_id):
+        with connect(self.database_url) as conn:
+            row = conn.execute("""SELECT result->'model_exchange' AS exchange FROM current_design_generations
+                WHERE flow_id=%s AND id=%s""", (flow_id, job_id)).fetchone()
+            if row is None:
+                raise KnowledgeError('未找到当前设计流程的模型生成记录', 404)
+            if row['exchange'] is None:
+                raise KnowledgeError('此生成任务没有可查看的模型请求与回复记录', 404)
+            return row['exchange']
 
     def action(self, flow_id, action, request: DesignAction):
         with connect(self.database_url) as conn:
@@ -366,6 +378,10 @@ class DesignService:
             KS._assert_project(conn, flow['project_id'])
             self._fresh(conn, flow)
 
+    def _record_late_exchange(self, conn, job, exchange):
+        if exchange and job['status'] in {'CANCELLED', 'FAILED', 'STALE'} and 'model_exchange' not in job['result']:
+            self._job_event(conn, job, job['status'], job['result'] | exchange)
+
     def run_job(self, job_id):
         """先短事务领取，完全退出数据库事务后调用模型，再检查基线并原子保存结果。"""
         with connect(self.database_url) as conn:
@@ -387,6 +403,11 @@ class DesignService:
             self._job_event(conn, job, 'RUNNING', {'diagnostic': '模型正在生成设计',
                 'deadline_at': (datetime.now(timezone.utc)+timedelta(seconds=generation_recovery_seconds(timeout))).isoformat()})
         trace = None
+        exchange = {}
+
+        def record_exchange(value):
+            exchange['model_exchange'] = value
+
         confirmed_scope = job['request'].get('generation_mode') == 'confirmed_scope'
         try:
             config = model_gateway.public_model_config()
@@ -396,7 +417,7 @@ class DesignService:
             schema = ConfirmedScopeDesign if confirmed_scope else DesignDocument
             result = model_gateway.complete_design(context, schema.model_json_schema(), confirmed_scope=confirmed_scope,
                 expected_fingerprint=job['request']['config_fingerprint'],
-                before_retry=lambda: self._check_model_retry(job['flow_id'], job_id))
+                before_retry=lambda: self._check_model_retry(job['flow_id'], job_id), on_exchange=record_exchange)
             trace = {**result['trace'], 'context_sha256': job['request']['input_sha256']}
             design = self._check_design(result['document'], flow, confirmed_context=context if confirmed_scope else None)
             trace['design_sha256'] = sha256(design)
@@ -405,7 +426,9 @@ class DesignService:
                 job = self._job(conn, job_id)
                 if job['status'] != 'RUNNING' or flow['status'] != 'GENERATING' or flow['state']['active_job_id'] != str(job_id):
                     if job['status'] == 'CANCELLED':
-                        self._job_event(conn, job, 'CANCELLED', {'diagnostic': '取消后模型返回，设计内容未发布', 'trace': trace})
+                        self._job_event(conn, job, 'CANCELLED', {'diagnostic': '取消后模型返回，设计内容未发布', 'trace': trace, **exchange})
+                    else:
+                        self._record_late_exchange(conn, job, exchange)
                     return
                 KS._assert_project(conn, flow['project_id'])
                 self._fresh(conn, flow)
@@ -423,7 +446,7 @@ class DesignService:
                 diagnostic = '等待澄清答复' if design['questions'] else '设计候选已生成，等待审阅'
                 if trace.get('attempt_count', 1) > 1:
                     diagnostic = '模型自动重试成功。' + diagnostic
-                self._job_event(conn, job, 'SUCCEEDED', {'diagnostic': diagnostic, 'trace': trace, 'questions': design['questions']})
+                self._job_event(conn, job, 'SUCCEEDED', {'diagnostic': diagnostic, 'trace': trace, 'questions': design['questions'], **exchange})
                 self._event(conn, flow, status, 'generated', 'model-worker', '模型返回已校验；没有自动批准或提交知识', state)
         except Exception as exc:
             if isinstance(exc, KnowledgeError):
@@ -439,11 +462,13 @@ class DesignService:
                 flow = self._lock(conn, job['flow_id'], writable=False)
                 if job['status'] == 'RUNNING' and flow['state']['active_job_id'] == str(job_id) and flow['status'] == 'GENERATING':
                     stale = isinstance(exc, KnowledgeError) and exc.status_code == 409
-                    self._job_event(conn, job, 'STALE' if stale else 'FAILED', {'diagnostic': message, **({'trace': trace} if trace else {})})
+                    self._job_event(conn, job, 'STALE' if stale else 'FAILED', {'diagnostic': message, **({'trace': trace} if trace else {}), **exchange})
                     state = deepcopy(flow['state'])
                     state['last_error'] = message
                     status = 'NEEDS_CLARIFICATION' if not stale and state['questions'] and state.get('question_job_id') else 'BLOCKED'
                     self._event(conn, flow, status, 'generation_failed', 'model-worker', message, state)
+                else:
+                    self._record_late_exchange(conn, job, exchange)
 
     def recover_expired(self):
         """进程中断后的超时任务只标失败，不自动重发可能产生费用的模型调用。"""

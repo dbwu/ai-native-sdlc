@@ -199,7 +199,7 @@ onBeforeUnmount(() => { ++generation; ++detailGeneration; stopPoll() })
         </label>
         <label class="field">关联已确认设计（可选）<select v-model="form.design" :disabled="controlsLocked"><option value="">暂不关联</option><option v-for="item in designs" :key="item.id" :value="item.id">{{ item.title }}</option></select><small>仅列出当前项目已确认完成的设计流程。使用代码生成时请选择设计。</small></label>
         <label class="field">操作署名<input v-model="actor" required maxlength="100" :disabled="controlsLocked"></label>
-        <div class="studio-actions"><button class="button primary" :disabled="controlsLocked || !form.name.trim() || !actor.trim()">创建工程工作区</button><RouterLink class="button secondary" :to="`/projects/${pid}/design`">查看需求设计</RouterLink></div>
+        <div class="studio-actions"><button class="button primary" :disabled="controlsLocked || !form.name.trim() || !actor.trim()">创建工程工作区</button><RouterLink v-if="!loading && !designs.length" class="button secondary" :to="`/projects/${pid}/design`">去确认一份设计</RouterLink></div>
       </form>
     </section>
     <div class="studio-grid">

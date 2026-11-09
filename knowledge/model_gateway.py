@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 import os
+import re
 from time import sleep
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -288,10 +289,10 @@ def _request_model(request, timeout, before_retry):
             before_retry()
 
 
-def complete_design(context, schema, *, confirmed_scope=False, expected_fingerprint=None, before_retry=None):
+def complete_design(context, schema, *, confirmed_scope=False, expected_fingerprint=None, before_retry=None, on_exchange=None):
     """调用配置服务，返回候选对象与无密钥追踪；业务语义由设计服务继续校验。"""
     prompt = _CONFIRMED_SCOPE_DESIGN if confirmed_scope else _DESIGN
-    return _complete_candidate(context, schema, prompt, expected_fingerprint, before_retry)
+    return _complete_candidate(context, schema, prompt, expected_fingerprint, before_retry, on_exchange=on_exchange)
 
 
 def complete_code(context, schema, *, language="python", expected_fingerprint=None, before_retry=None):
@@ -302,7 +303,37 @@ def complete_code(context, schema, *, language="python", expected_fingerprint=No
     return _complete_candidate(context, schema, prompt, expected_fingerprint, before_retry)
 
 
-def _complete_candidate(context, schema, prompt, expected_fingerprint, before_retry):
+def _exchange_redactor(api_key):
+    secrets = {api_key, json.dumps(api_key, ensure_ascii=False)[1:-1]} if api_key else set()
+    pattern = re.compile('|'.join(re.escape(secret) for secret in sorted(secrets, key=len, reverse=True))) if secrets else None
+
+    def text(value):
+        if not isinstance(value, str):
+            return None
+        value = re.sub(r'[\x00\ud800-\udfff]', '�', value)
+        return pattern.sub('＊', value) if pattern else value
+
+    return text
+
+
+def _exchange_request(payload, redact):
+    def schema_value(value):
+        if isinstance(value, str):
+            return redact(value)
+        if isinstance(value, list):
+            return [schema_value(item) for item in value]
+        if isinstance(value, dict):
+            return {redact(str(key)): schema_value(item) for key, item in value.items()}
+        return value
+
+    request = dict(payload, model=redact(payload['model']), messages=[
+        {'role': redact(message['role']), 'content': redact(message['content'])} for message in payload['messages']])
+    if 'response_format' in request:
+        request['response_format'] = schema_value(request['response_format'])
+    return request
+
+
+def _complete_candidate(context, schema, prompt, expected_fingerprint, before_retry, *, on_exchange=None):
     config = _config()
     _ensure(config)
     if expected_fingerprint is not None and expected_fingerprint != _config_fingerprint(config):
@@ -327,6 +358,16 @@ def _complete_candidate(context, schema, prompt, expected_fingerprint, before_re
     if config.api_key:
         headers["Authorization"] = "Bearer " + config.api_key
     request = Request(endpoint, data=body, headers=headers, method="POST")
+    audit_request = None
+    if on_exchange is not None:
+        redact = _exchange_redactor(config.api_key)
+        try:
+            audit_request = _exchange_request(json.loads(body), redact)
+        except (ValueError, RecursionError):
+            # 无法安全生成脱敏副本时跳过留档，模型请求仍使用已校验的正文。
+            pass
+        if audit_request is not None:
+            on_exchange({'request': audit_request, 'response': None})
     raw, request_id, attempts = _request_model(request, config.timeout_seconds, before_retry)
     if len(raw) > MAX_RESPONSE_BYTES:
         raise KnowledgeError(f"模型响应超过允许的2 MiB上限，未保存候选{prompt.candidate}。", 502)
@@ -339,6 +380,12 @@ def _complete_candidate(context, schema, prompt, expected_fingerprint, before_re
         message = choice["message"]
         if not isinstance(message, dict):
             raise ValueError()
+        if audit_request is not None:
+            on_exchange({'request': audit_request, 'response': {
+                'content': redact(message.get('content')),
+                'finish_reason': redact(choice.get('finish_reason')),
+                'refusal': redact(message.get('refusal')),
+            }})
         if message.get("refusal") or choice.get("finish_reason") == "content_filter":
             raise KnowledgeError(f"模型拒绝生成本次{prompt.candidate}，请调整{prompt.scope}后重试。", 502)
         if choice.get("finish_reason") == "length":

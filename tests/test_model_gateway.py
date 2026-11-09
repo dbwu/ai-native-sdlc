@@ -154,6 +154,83 @@ def test_confirmed_scope_design_uses_saved_answers_and_a_distinct_prompt(configu
     assert result["trace"]["prompt_version"] == gateway.CONFIRMED_SCOPE_PROMPT_VERSION != gateway.PROMPT_VERSION
 
 
+def test_design_exchange_records_actual_request_and_reply_without_http_metadata(configured, monkeypatch):
+    context = {"requirements": [{"name": "选课人数上限"}]}
+    reply = response({"summary": "选课设计", "questions": []})
+    reply["choices"][0]["message"]["reasoning_content"] = "提供商额外字段"
+    calls = install_transport(monkeypatch, reply)
+    exchanges = []
+
+    result = gateway.complete_design(context, {}, confirmed_scope=True, on_exchange=exchanges.append)
+
+    payload = json.loads(calls[0][0].data)
+    assert exchanges == [
+        {"request": payload, "response": None},
+        {"request": payload, "response": {"content": reply["choices"][0]["message"]["content"],
+                                          "finish_reason": "stop", "refusal": None}},
+    ]
+    assert calls[0][0].get_header("Authorization") and "Authorization" not in json.dumps(exchanges)
+    assert "提供商额外字段" not in json.dumps(exchanges, ensure_ascii=False)
+    assert result["document"]["summary"] == "选课设计"
+
+
+def test_design_exchange_redacts_keys_in_both_plain_and_json_escaped_values(configured, monkeypatch):
+    secret = 'audit-secret"with\\escape'
+    encoded = json.dumps(secret)[1:-1]
+    monkeypatch.setenv("KNOWLEDGE_MODEL_API_KEY", secret)
+    monkeypatch.setenv("KNOWLEDGE_MODEL_RESPONSE_FORMAT", "json_schema")
+    reply = response({"summary": secret})
+    calls = install_transport(monkeypatch, reply)
+    exchanges = []
+
+    gateway.complete_design({"title": secret}, {"title": secret}, on_exchange=exchanges.append)
+
+    payload = json.loads(calls[0][0].data)
+    assert json.loads(payload["messages"][1]["content"])["context"]["title"] == secret
+    audit = exchanges[-1]
+    assert json.loads(audit["request"]["messages"][1]["content"])["context"]["title"] == "＊"
+    assert audit["request"]["response_format"]["json_schema"]["schema"]["title"] == "＊"
+    assert json.loads(audit["response"]["content"])["summary"] == "＊"
+    assert secret not in repr(exchanges) and encoded not in repr(exchanges)
+
+
+@pytest.mark.parametrize("reply,error,expected", [
+    (response(finish_reason="length", message={"content": "{未完成"}), "截断",
+     {"content": "{未完成", "finish_reason": "length", "refusal": None}),
+    (response(message={"content": None, "refusal": "需要明确范围"}), "拒绝",
+     {"content": None, "finish_reason": "stop", "refusal": "需要明确范围"}),
+    ({"error": {"message": "服务商错误详细信息"}}, "JSON", None),
+])
+def test_design_exchange_preserves_visible_reply_even_if_validation_fails(configured, monkeypatch, reply, error, expected):
+    install_transport(monkeypatch, reply)
+    exchanges = []
+    with pytest.raises(KnowledgeError, match=error):
+        gateway.complete_design({}, {}, on_exchange=exchanges.append)
+    assert exchanges[-1]["response"] == expected
+
+
+def test_design_exchange_removes_unstorable_characters_from_invalid_reply(configured, monkeypatch):
+    invalid_reply = json.dumps(response(message={"content": "候选\x00\ud800"})).encode()
+    install_transport(monkeypatch, invalid_reply)
+    exchanges = []
+    with pytest.raises(KnowledgeError, match="JSON"):
+        gateway.complete_design({}, {}, on_exchange=exchanges.append)
+    assert exchanges[-1]["response"]["content"] == "候选��"
+    json.dumps(exchanges, ensure_ascii=False).encode("utf-8")
+
+
+def test_design_exchange_keeps_only_request_when_transport_fails(configured, monkeypatch):
+    def transport(request, timeout):
+        raise URLError("未公开的网络细节")
+
+    monkeypatch.setattr(gateway, "_open_request", transport)
+    exchanges = []
+    with pytest.raises(KnowledgeError, match="无法连接"):
+        gateway.complete_design({}, {}, on_exchange=exchanges.append)
+    assert len(exchanges) == 1 and exchanges[0]["response"] is None
+    assert exchanges[0]["request"]["messages"][0]["role"] == "system"
+
+
 def test_code_uses_a_separate_prompt_and_schema_for_the_fixed_workspace_context(configured, monkeypatch):
     monkeypatch.setenv("KNOWLEDGE_MODEL_RESPONSE_FORMAT", "json_schema")
     context = {"design": {"summary": "选课容量校验"}, "workspace_files": [{"path": "enrollment.py", "content": ""}]}

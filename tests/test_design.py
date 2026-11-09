@@ -1,6 +1,7 @@
 """仅需求起步、模型澄清、设计候选与显式审核的真实数据库回归。"""
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+from io import BytesIO
 import json
 from threading import Lock
 from uuid import UUID, uuid4
@@ -118,6 +119,64 @@ def test_requirement_only_design_is_not_published_until_explicit_review(client, 
     relations = client.get(f"/relationships?project_id={project['id']}").json()
     assert relations and all(item['status'] == 'proposed' for item in relations)
     assert all(item['attributes']['category'] == 'analysis' for item in records if item['kind'] == 'Evidence')
+
+
+@pytest.mark.parametrize('outcome', ['success', 'truncated', 'timeout'])
+def test_generation_records_platform_input_and_model_reply_separately(
+        client, db_url, project, requirement, monkeypatch, outcome):
+    requests = []
+    received = []
+    secret = 'synthetic-exchange-token'
+    monkeypatch.setenv('KNOWLEDGE_MODEL_API_KEY', secret)
+    monkeypatch.setattr(model_gateway, 'sleep', lambda _: None)
+
+    def transport(request, timeout):
+        payload = json.loads(request.data)
+        requests.append(payload)
+        assert request.get_header('Authorization') == 'Bearer ' + secret
+        if outcome == 'timeout':
+            raise TimeoutError()
+        context = json.loads(payload['messages'][1]['content'])['context']
+        content = (json.dumps(document(context), ensure_ascii=False, indent=2) if outcome == 'success'
+                   else '{"summary":"尚未输出完毕 ' + secret)
+        received.append(content)
+        body = {'choices': [{'message': {'role': 'assistant', 'content': content},
+                             'finish_reason': 'stop' if outcome == 'success' else 'length'}]}
+        reply = BytesIO(json.dumps(body, ensure_ascii=False).encode())
+        reply.headers = {'x-request-id': 'exchange-test'}
+        return reply
+
+    monkeypatch.setattr(model_gateway, '_open_request', transport)
+    current = action(client, create(client, project, requirement), 'start')
+    queued = action(client, current, 'generate_confirmed', 202)
+    flow_id = current['flow']['id']
+    job_id = queued['jobs'][0]['id']
+    endpoint = f'/design/flows/{flow_id}/generations/{job_id}/model-exchange'
+    assert queued['jobs'][0]['has_model_exchange'] is False
+    assert client.get(endpoint).status_code == 404
+    DesignService(db_url).run_job(UUID(job_id))
+
+    current = detail(client, flow_id)
+    job = current['jobs'][0]
+    assert job['has_model_exchange'] is True and 'model_exchange' not in job['result']
+    assert job['status'] == ('SUCCEEDED' if outcome == 'success' else 'FAILED')
+    assert client.get(f'/design/flows/{uuid4()}/generations/{job_id}/model-exchange').status_code == 404
+    response = client.get(endpoint)
+    assert response.status_code == 200 and response.headers['Cache-Control'] == 'no-store'
+    exchange = response.json()
+    assert exchange['request'] == requests[-1]
+    assert exchange['request']['messages'][0]['role'] == 'system'
+    assert exchange['request']['messages'][1]['role'] == 'user'
+    assert secret not in response.text and 'Authorization' not in exchange['request']
+    if outcome == 'timeout':
+        assert len(requests) == 2 and requests[0] == requests[1]
+        assert exchange['response'] is None and current['proposal'] is None
+    elif outcome == 'truncated':
+        assert exchange['response']['finish_reason'] == 'length' and current['proposal'] is None
+        assert exchange['response']['content'].startswith('{"summary":"尚未输出完毕 ')
+    else:
+        assert exchange['response']['finish_reason'] == 'stop' and exchange['response']['content'] == received[0]
+        assert current['proposal']['status'] == 'pending'
 
 
 @pytest.mark.parametrize('legacy_history', [False, True])

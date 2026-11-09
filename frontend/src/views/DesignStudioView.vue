@@ -5,6 +5,7 @@ import { ApiError, request } from '../api/client'
 import { notify, selectProject, state } from '../store/workbench'
 import { dateTime } from '../lib/display'
 import type { RecordData } from '../types'
+import DesignModelExchange from '../components/DesignModelExchange.vue'
 import ProposalDiff from '../components/ProposalDiff.vue'
 import StatusPill from '../components/StatusPill.vue'
 
@@ -201,7 +202,7 @@ onBeforeUnmount(() => { ++generation; ++detailGeneration; stopPoll() })
         <fieldset class="studio-choices"><legend>选择已有需求及当前版本</legend><label v-for="item in requirements" :key="item.id" class="check-field"><input v-model="form.requirements" type="checkbox" :value="item.id" :disabled="busy"><span>{{ item.name }} <small>知识版本 v{{ item.version }}</small></span></label><p v-if="!requirements.length">尚无可选需求。先到“项目知识”新建需求并明确提交提案。</p></fieldset>
         <details v-if="inputs.length" class="studio-optional"><summary>补充业务规则与工程约束（可选）</summary><label v-for="item in inputs" :key="item.id" class="check-field"><input v-model="form.inputs" type="checkbox" :value="item.id" :disabled="busy"><span>{{ item.name }} · v{{ item.version }}</span></label></details>
         <label class="field">操作署名<input v-model="actor" required maxlength="100" :disabled="busy" placeholder="你的姓名或本地署名"></label>
-        <div class="studio-actions"><button class="button primary" :disabled="busy || !form.title.trim() || !form.goal.trim() || !form.requirements.length || !actor.trim()">{{ busy ? '正在保存…' : '创建需求设计流程' }}</button><RouterLink class="button secondary" :to="`/projects/${pid}/knowledge`">去维护项目需求</RouterLink></div>
+        <div class="studio-actions"><button class="button primary" :disabled="busy || !form.title.trim() || !form.goal.trim() || !form.requirements.length || !actor.trim()">{{ busy ? '正在保存…' : '创建需求设计流程' }}</button><RouterLink v-if="!loading && !requirements.length" class="button secondary" :to="`/projects/${pid}/knowledge`">去新建需求</RouterLink></div>
       </form>
     </section>
 
@@ -297,6 +298,8 @@ onBeforeUnmount(() => { ++generation; ++detailGeneration; stopPoll() })
                 </li>
               </ol>
             </details>
+            <DesignModelExchange :flow-id="flow.id" :job-id="job.id" :available="job.has_model_exchange === true"
+              :pending="['QUEUED', 'RUNNING'].includes(job.status)" />
             <dl v-if="job.trace" class="studio-meta"><div><dt>模型</dt><dd>{{ job.trace.model || '—' }}</dd></div><div><dt>提供方</dt><dd>{{ job.trace.provider || '—' }}</dd></div><div><dt>提示版本</dt><dd>{{ job.trace.prompt_version || '—' }}</dd></div></dl>
             <details v-if="job.trace"><summary>查看调用来源与摘要</summary><pre>{{ JSON.stringify(job.trace, null, 2) }}</pre></details>
           </article>

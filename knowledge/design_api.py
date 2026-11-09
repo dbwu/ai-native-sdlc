@@ -31,6 +31,11 @@ def design_router(url_provider):
     def detail(flow_id: UUID):
         return service().snapshot(flow_id)
 
+    @router.get('/flows/{flow_id}/generations/{job_id}/model-exchange', summary='查看本轮发给模型的输入和模型回复')
+    def model_exchange(flow_id: UUID, job_id: UUID, response: Response):
+        response.headers['Cache-Control'] = 'no-store'
+        return service().model_exchange(flow_id, job_id)
+
     @router.post('/flows/{flow_id}/actions/{action}', summary='确认需求、生成设计及明确审阅确认')
     def action(flow_id: UUID, action: Literal['start', 'generate', 'generate_confirmed', 'validate', 'commit', 'complete', 'reject', 'cancel'],
                body: DesignAction, response: Response):
