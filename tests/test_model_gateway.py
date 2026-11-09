@@ -127,6 +127,92 @@ def test_legacy_token_parameter_is_explicit(configured, monkeypatch):
     assert payload["max_tokens"] == 2048 and "max_completion_tokens" not in payload
 
 
+def test_confirmed_scope_design_uses_saved_answers_and_a_distinct_prompt(configured, monkeypatch):
+    context = {
+        "requirements": [{"id": "req-1", "acceptance_criteria": ["满员时拒绝选课"]}],
+        "clarifications": [{"key": "capacity", "answer": "按教学班计算容量"}],
+        "pending_questions": [{"key": "notification", "question": "是否通知学生？"}],
+        "generation_guidance": "先形成容量限制设计",
+    }
+    schema = {"type": "object", "properties": {"questions": {"type": "array"}}}
+    document = {"summary": "教学班容量限制设计", "questions": [], "assumptions": ["接口命名待审阅"],
+                "deferred_items": ["满员通知另行设计"]}
+    calls = install_transport(monkeypatch, response(document))
+
+    result = gateway.complete_design(context, schema, confirmed_scope=True)
+
+    assert len(calls) == 1
+    body = json.loads(calls[0][0].data)
+    prompt = body["messages"][0]["content"]
+    assert "已明确回答的问题不要重复追问" in prompt
+    assert "未决业务规则会改变本轮某项具体验收结果" in prompt
+    assert "acceptance_criterion 逐字复制" in prompt and "options 列出 2 至 5 个具体选项" in prompt
+    assert "非阻塞的实现选择列入 assumptions" in prompt and "范围外的问题列入 deferred_items" in prompt
+    assert "返回空的 questions，直接产出完整的候选设计" in prompt
+    assert json.loads(body["messages"][1]["content"]) == {"context": context, "output_schema": schema}
+    assert result["document"] == document
+    assert result["trace"]["prompt_version"] == gateway.CONFIRMED_SCOPE_PROMPT_VERSION != gateway.PROMPT_VERSION
+
+
+def test_code_uses_a_separate_prompt_and_schema_for_the_fixed_workspace_context(configured, monkeypatch):
+    monkeypatch.setenv("KNOWLEDGE_MODEL_RESPONSE_FORMAT", "json_schema")
+    context = {"design": {"summary": "选课容量校验"}, "workspace_files": [{"path": "enrollment.py", "content": ""}]}
+    schema = {"type": "object", "required": ["summary", "files"]}
+    document = {"summary": "添加容量校验", "files": [{"path": "enrollment.py", "content": "LIMIT = 10\n"}]}
+    calls = install_transport(monkeypatch, response(document))
+
+    result = gateway.complete_code(context, schema)
+
+    assert len(calls) == 1
+    body = json.loads(calls[0][0].data)
+    assert body["response_format"]["json_schema"] == {
+        "name": "engineering_code_changes", "strict": False, "schema": schema,
+    }
+    assert "unittest" in body["messages"][0]["content"]
+    assert "已确认设计" in body["messages"][0]["content"]
+    assert "deferred_items 的后续事项不属于本轮代码和测试范围" in body["messages"][0]["content"]
+    assert json.loads(body["messages"][1]["content"]) == {"context": context, "output_schema": schema}
+    assert result["document"] == document
+    assert result["trace"]["prompt_version"] == gateway.CODE_PROMPT_VERSION != gateway.PROMPT_VERSION
+    assert "synthetic-secret" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("language,filename,standard,test_entry,test_layout", [
+    ("c", "tests/test_enrollment.c", "C11", "main", "tests/test_*.c"),
+    ("cpp", "tests/test_enrollment.cpp", "C++17", "main", "tests/test_*.cpp"),
+    ("java", "src/test/java/EnrollmentTest.java", "Java 17", "AssertionError", "src/test/java/"),
+])
+def test_code_uses_language_specific_source_rules(configured, monkeypatch, language, filename, standard, test_entry, test_layout):
+    context = {"language": language, "design": {"summary": "选课容量校验"}}
+    document = {"summary": "添加容量校验", "files": [{"path": filename, "content": "source"}]}
+    calls = install_transport(monkeypatch, response(document))
+
+    result = gateway.complete_code(context, {}, language=language)
+
+    request = json.loads(calls[0][0].data)
+    prompt = request["messages"][0]["content"]
+    assert standard in prompt and filename[filename.rfind("."):] in prompt and test_entry in prompt
+    assert test_layout in prompt
+    assert "unittest" not in prompt and "不要声称测试已运行或通过" in prompt
+    assert result["document"] == document
+    assert "deferred_items 的后续事项不属于本轮代码和测试范围" in prompt
+    assert result["trace"]["prompt_version"] == f"confirmed-design-code-{language}-v3"
+
+
+def test_unsupported_code_language_is_rejected_before_contacting_model(configured, monkeypatch):
+    calls = install_transport(monkeypatch, response())
+    with pytest.raises(KnowledgeError, match="代码生成仅支持"):
+        gateway.complete_code({}, {}, language="go")
+    assert calls == []
+
+
+def test_truncated_code_output_is_not_a_candidate_or_retried(configured, monkeypatch):
+    calls = install_transport(monkeypatch, response(finish_reason="length"))
+    with pytest.raises(KnowledgeError, match="长度上限截断"):
+        gateway.complete_code({}, {})
+    assert len(calls) == 1
+
+
 @pytest.mark.parametrize("name,value", [("PROVIDER", "unknown"), ("TIMEOUT_SECONDS", "nan"),
                                        ("TIMEOUT_SECONDS", "0"), ("MAX_OUTPUT_TOKENS", "40000"),
                                        ("RESPONSE_FORMAT", "yaml"), ("TOKEN_PARAMETER", "unknown"),
@@ -140,11 +226,10 @@ def test_invalid_configuration_fails_closed(configured, monkeypatch, name, value
 
 
 @pytest.mark.parametrize("failure,status,fragment", [
-    (TimeoutError("synthetic-secret"), 504, "超时"),
-    (URLError(TimeoutError("synthetic-secret")), 504, "超时"),
     (URLError("synthetic-secret"), 502, "无法连接"),
     (HTTPError("https://model.example", 401, "synthetic-secret", {}, BytesIO(b"synthetic-secret")), 502, "认证失败"),
     (HTTPError("https://model.example", 429, "synthetic-secret", {}, BytesIO(b"synthetic-secret")), 502, "限流"),
+    (HTTPError("https://model.example", 400, "synthetic-secret", {}, BytesIO(b"synthetic-secret")), 502, "请求失败"),
     (HTTPError("https://model.example", 302, "redirect", {"Location": "https://other.example"}, BytesIO()), 502, "重定向"),
 ])
 def test_transport_errors_are_safe_and_never_retried(configured, monkeypatch, failure, status, fragment):
@@ -159,6 +244,51 @@ def test_transport_errors_are_safe_and_never_retried(configured, monkeypatch, fa
         gateway.complete_design({}, {})
     assert exc.value.status_code == status and fragment in exc.value.message
     assert "synthetic-secret" not in exc.value.message and len(calls) == 1
+
+
+@pytest.mark.parametrize("failure", [
+    lambda: TimeoutError("synthetic-secret"),
+    lambda: URLError(TimeoutError("synthetic-secret")),
+    lambda: HTTPError("https://model.example", 503, "synthetic-secret", {}, BytesIO()),
+])
+def test_transient_failure_retries_once_with_same_request(configured, monkeypatch, failure):
+    events = []
+    calls = []
+
+    def transport(request, timeout):
+        events.append('call')
+        calls.append((request.data, timeout))
+        if len(calls) == 1:
+            raise failure()
+        return FakeResponse(response())
+
+    monkeypatch.setenv('KNOWLEDGE_MODEL_TIMEOUT_SECONDS', '180')
+    monkeypatch.setattr(gateway, '_open_request', transport)
+    monkeypatch.setattr(gateway, 'sleep', events.append)
+    result = gateway.complete_design({}, {}, before_retry=lambda: events.append('check'))
+    assert events == ['call', 2, 'check', 'call']
+    assert calls[0] == calls[1] and calls[1][1] == 180
+    assert result['document']['summary'] == '候选设计' and result['trace']['attempt_count'] == 2
+
+
+def test_repeated_read_timeout_reports_exhausted_retry(configured, monkeypatch):
+    calls = []
+
+    class SlowResponse(FakeResponse):
+        def read(self, size):
+            raise TimeoutError('synthetic-secret')
+
+    def transport(request, timeout):
+        reply = SlowResponse(response())
+        calls.append(reply)
+        return reply
+
+    monkeypatch.setattr(gateway, '_open_request', transport)
+    monkeypatch.setattr(gateway, 'sleep', lambda seconds: None)
+    with pytest.raises(KnowledgeError, match='超时。已尝试2次') as exc:
+        gateway.complete_design({}, {})
+    assert exc.value.status_code == 504 and 'synthetic-secret' not in exc.value.message
+    assert len(calls) == 2 and all(reply.closed for reply in calls)
 
 
 @pytest.mark.parametrize("value,fragment", [

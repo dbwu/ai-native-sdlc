@@ -120,7 +120,15 @@ def test_requirement_only_design_is_not_published_until_explicit_review(client, 
     assert all(item['attributes']['category'] == 'analysis' for item in records if item['kind'] == 'Evidence')
 
 
-def test_clarification_requires_all_answers_and_explicit_regeneration(client, db_url, project, requirement, monkeypatch):
+@pytest.mark.parametrize('legacy_history', [False, True])
+def test_clarification_requires_all_answers_and_explicit_regeneration(client, db_url, project, requirement, monkeypatch, legacy_history):
+    if legacy_history:
+        record_job = DesignService._job_event
+
+        def legacy_record(conn, job, status, result):
+            return record_job(conn, job, status, {key: value for key, value in result.items() if key != 'questions'})
+
+        monkeypatch.setattr(DesignService, '_job_event', staticmethod(legacy_record))
     calls = []
     def model(context, schema, **kwargs):
         calls.append(context)
@@ -131,6 +139,8 @@ def test_clarification_requires_all_answers_and_explicit_regeneration(client, db
     monkeypatch.setattr(model_gateway, 'complete_design', model)
     current = generate(client, db_url, action(client, create(client, project, requirement), 'start'))
     assert current['flow']['status'] == 'NEEDS_CLARIFICATION' and current['proposal'] is None
+    original_job = current['jobs'][0]['id']
+    assert current['jobs'][0]['questions'] == current['questions'] and current['jobs'][0]['answers'] == []
     body = {'expected_version': current['flow']['version'], 'actor': '需求负责人', 'reason': '明确确认计数规则',
             'answers': [{'key': 'Unknown', 'answer': '按有效教学班计数'}]}
     endpoint = f"/design/flows/{current['flow']['id']}/answers"
@@ -144,6 +154,100 @@ def test_clarification_requires_all_answers_and_explicit_regeneration(client, db
     assert current['flow']['status'] == 'REVIEW_PENDING'
     assert calls[-1]['clarifications'][0]['answer'] == '按有效教学班计数'
     assert len(current['jobs']) == 2
+    first = next(job for job in current['jobs'] if job['id'] == original_job)
+    assert first['questions'][0]['question'] == '数量上限按课程还是教学班计数？'
+    assert first['answers'][0]['answer'] == '按有效教学班计数'
+    assert current['jobs'][0]['answers'] == []
+
+
+def test_confirmed_scope_keeps_existing_answers_and_moves_unanswered_side_issue_to_deferred(
+        client, db_url, project, requirement, monkeypatch):
+    calls = []
+
+    def model(context, schema, *, confirmed_scope=False, **kwargs):
+        calls.append((context, confirmed_scope))
+        if confirmed_scope:
+            result = document(context)
+            result['deferred_items'] = ['选课成功通知在后续流程设计。']
+            return returned(result)
+        key, question = ('Notification', '是否发送选课通知？') if context['clarifications'] else ('CountUnit', '如何计数？')
+        return returned({'summary': '等待明确规则', 'questions': [
+            {'key': key, 'question': question, 'requirement_ids': [requirement['id']]}]})
+
+    monkeypatch.setattr(model_gateway, 'complete_design', model)
+    current = generate(client, db_url, action(client, create(client, project, requirement), 'start'))
+    flow_id = current['flow']['id']
+    response = client.post(f'/design/flows/{flow_id}/answers', json={
+        'expected_version': current['flow']['version'], 'actor': '需求负责人', 'reason': '确认业务规则',
+        'answers': [{'key': 'CountUnit', 'answer': '按有效教学班计数'}],
+    })
+    assert response.status_code == 200, response.text
+    current = generate(client, db_url, response.json())
+    action(client, current, 'generate', 409)
+    queued = action(client, current, 'generate_confirmed', 202)
+    action(client, queued, 'generate_confirmed', 409)
+    DesignService(db_url).run_job(UUID(queued['flow']['state']['active_job_id']))
+    current = detail(client, flow_id)
+    assert current['flow']['status'] == 'REVIEW_PENDING' and current['proposal']['status'] == 'pending'
+    assert current['flow']['id'] == flow_id and current['design']['deferred_items'] == ['选课成功通知在后续流程设计。']
+    context, confirmed_scope = calls[-1]
+    assert confirmed_scope and context['generation_guidance']
+    assert context['pending_questions'][0]['key'] == 'Notification'
+    assert context['clarifications'][0]['answer'] == '按有效教学班计数'
+    new, pending, answered = current['jobs']
+    assert new['generation_mode'] == 'confirmed_scope' and new['questions'] == []
+    assert pending['questions'][0]['question'] == '是否发送选课通知？' and pending['answers'] == []
+    assert answered['questions'][0]['question'] == '如何计数？' and answered['answers'][0]['answer'] == '按有效教学班计数'
+
+
+@pytest.mark.parametrize('invalid', [None, 'unbound_criterion', 'repeated_question'])
+def test_confirmed_scope_validates_blockers_and_preserves_previous_unanswered_questions(
+        client, db_url, project, requirement, monkeypatch, invalid):
+    original_question = '此前确认过的计数单位是什么？'
+
+    def model(context, schema, *, confirmed_scope=False, **kwargs):
+        if confirmed_scope:
+            question = {'key': 'Third', 'question': '第三次请求同时是重复请求时，是否仍允许幂等返回？',
+                        'requirement_ids': [requirement['id']],
+                        'acceptance_criterion': requirement['attributes']['acceptance_criteria'][0],
+                        'acceptance_impact': '决定达到上限后的重复请求是返回旧记录，还是返回容量错误。',
+                        'options': ['返回已有记录', '返回数量上限错误']}
+            if invalid == 'unbound_criterion':
+                question['acceptance_criterion'] = '本轮未绑定的验收条件。'
+            if invalid == 'repeated_question':
+                question['question'] = original_question.replace('？', '?')
+        else:
+            question = {'key': 'First' if not context['clarifications'] else 'Second',
+                        'question': original_question if not context['clarifications'] else '需要通知吗？',
+                        'requirement_ids': [requirement['id']]}
+        return returned({'summary': '澄清', 'questions': [question]})
+
+    def answer(current, key):
+        response = client.post(f"/design/flows/{current['flow']['id']}/answers", json={
+            'expected_version': current['flow']['version'], 'actor': '需求负责人', 'reason': '确认问题',
+            'answers': [{'key': key, 'answer': '确认当前规则'}],
+        })
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    monkeypatch.setattr(model_gateway, 'complete_design', model)
+    current = generate(client, db_url, action(client, create(client, project, requirement), 'start'))
+    current = generate(client, db_url, answer(current, 'First'))
+    previous_job = current['jobs'][0]['id']
+    queued = action(client, current, 'generate_confirmed', 202)
+    DesignService(db_url).run_job(UUID(queued['flow']['state']['active_job_id']))
+    current = detail(client, current['flow']['id'])
+    assert current['flow']['status'] == 'NEEDS_CLARIFICATION' and current['proposal'] is None
+    if invalid:
+        assert current['jobs'][0]['status'] == 'FAILED' and current['questions'][0]['key'] == 'Second'
+        assert current['flow']['state']['last_error']
+        current = answer(current, 'Second')
+        assert current['jobs'][0]['answers'] == []
+        assert current['jobs'][1]['id'] == previous_job and current['jobs'][1]['answers'][0]['key'] == 'Second'
+    else:
+        assert current['jobs'][0]['questions'][0]['acceptance_impact'] == current['questions'][0]['acceptance_impact']
+        current = answer(current, 'Third')
+        assert current['jobs'][0]['answers'][0]['key'] == 'Third' and current['jobs'][1]['answers'] == []
 
 
 @pytest.mark.parametrize('invalid', ['unknown_requirement', 'missing_component', 'missing_test', 'foreign_component', 'extra_code_field', 'empty_contract', 'empty_data_model'])
@@ -209,6 +313,22 @@ def test_cancel_during_model_call_discards_result(client, db_url, project, requi
     assert current['proposal'] is None and current['jobs'][0]['status'] == 'CANCELLED'
 
 
+def test_cancel_during_retry_wait_prevents_second_model_call(client, db_url, project, requirement, monkeypatch):
+    calls = []
+    current = action(client, create(client, project, requirement), 'start')
+    flow_id = current['flow']['id']
+
+    def timeout(request, seconds):
+        calls.append(seconds)
+        raise TimeoutError()
+
+    monkeypatch.setattr(model_gateway, '_open_request', timeout)
+    monkeypatch.setattr(model_gateway, 'sleep', lambda _: action(client, detail(client, flow_id), 'cancel'))
+    current = generate(client, db_url, current)
+    assert current['flow']['status'] == 'CANCELLED' and current['jobs'][0]['status'] == 'CANCELLED'
+    assert current['proposal'] is None and len(calls) == 1
+
+
 def test_concurrent_workers_claim_generation_only_once(client, db_url, project, requirement, monkeypatch):
     counter, lock = [], Lock()
     def model(context, schema, **kwargs):
@@ -235,16 +355,23 @@ def test_model_disabled_and_old_page_actions_are_rejected(client, project, requi
     assert detail(client, current['flow']['id'])['jobs'] == []
 
 
-def test_review_reject_retry_retains_old_proposal_and_stable_candidate_ids(client, db_url, project, requirement, fake_model):
+def test_review_reject_regeneration_continues_past_five_with_history(client, db_url, project, requirement, fake_model):
     current = generate(client, db_url, action(client, create(client, project, requirement), 'start'))
+    flow_id = current['flow']['id']
     first = current['proposal']
     first_ids = {item['entity_id'] for item in first['plan']['entity_mapping']}
-    current = action(client, current, 'reject')
-    assert current['flow']['status'] == 'READY'
-    current = generate(client, db_url, current)
-    assert current['proposal']['id'] != first['id']
-    assert {item['entity_id'] for item in current['proposal']['plan']['entity_mapping']} == first_ids
+    for _ in range(5):
+        previous_id = current['proposal']['id']
+        current = action(client, current, 'reject')
+        assert current['flow']['status'] == 'READY'
+        current = generate(client, db_url, current)
+        assert current['proposal']['id'] != previous_id
+        assert {item['entity_id'] for item in current['proposal']['plan']['entity_mapping']} == first_ids
+    assert current['flow']['id'] == flow_id
+    assert current['flow']['state']['generation_count'] == len(current['jobs']) == len(fake_model) == 6
     assert client.get('/operations/proposals/'+first['id']).json()['status'] == 'rejected'
+    current = action(client, action(client, current, 'validate'), 'commit')
+    assert current['proposal']['status'] == 'committed'
 
 
 def test_design_proposal_baseline_cannot_be_bypassed_via_project_review(client, db_url, project, requirement, fake_model):
@@ -292,17 +419,26 @@ def test_secret_rotation_between_enqueue_and_call_requires_explicit_retry(client
     assert 'test-only-rotated-secret' not in json.dumps(current)
 
 
-def test_interrupted_generation_expires_without_automatically_recalling_model(client, db_url, project, requirement, fake_model):
+@pytest.mark.parametrize('recorded_deadline', [False, True])
+def test_interrupted_generation_expires_without_automatically_recalling_model(client, db_url, project, requirement, fake_model, recorded_deadline):
     current = action(client, create(client, project, requirement), 'start')
     queued = action(client, current, 'generate', 202)
     job_id = UUID(queued['flow']['state']['active_job_id'])
+    service = DesignService(db_url)
     with connect(db_url) as conn:
         conn.execute("""INSERT INTO design_generation_event(job_id,version,status,document,recorded_at)
-            VALUES (%s,2,'RUNNING','{}',clock_timestamp()-interval '11 minutes')""", (job_id,))
-    DesignService(db_url).recover_expired()
+            VALUES (%s,2,'RUNNING',CASE WHEN %s THEN jsonb_build_object('deadline_at',clock_timestamp()+interval '1 minute')
+            ELSE '{}'::jsonb END,clock_timestamp()-interval '11 minutes')""", (job_id, recorded_deadline))
+    if recorded_deadline:
+        service.recover_expired()
+        assert detail(client, queued['flow']['id'])['jobs'][0]['status'] == 'RUNNING'
+        with connect(db_url) as conn:
+            conn.execute("""INSERT INTO design_generation_event(job_id,version,status,document)
+                VALUES (%s,3,'RUNNING',jsonb_build_object('deadline_at',clock_timestamp()-interval '1 second'))""", (job_id,))
+    service.recover_expired()
     current = detail(client, current['flow']['id'])
     assert current['flow']['status'] == 'BLOCKED' and current['jobs'][0]['status'] == 'FAILED'
-    DesignService(db_url).run_job(job_id)
+    service.run_job(job_id)
     assert not fake_model
     current = generate(client, db_url, current)
     assert len(current['jobs']) == 2 and len(fake_model) == 1

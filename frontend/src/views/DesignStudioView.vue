@@ -13,9 +13,10 @@ const pid = computed(() => String(route.params.projectId || ''))
 const flows = ref<RecordData[]>([]), catalog = ref<RecordData[]>([]), config = ref<RecordData>({ configured: false })
 const detail = ref<RecordData | null>(null), diff = ref<RecordData | null>(null)
 const loading = ref(false), busy = ref(false), error = ref(''), flowId = ref(''), confirmed = ref(false)
+const confirmedScope = ref(false)
 const showCreate = ref(false), actor = ref(state.actor || ''), reason = ref('')
 const form = reactive({ title: '', goal: '', requirements: [] as string[], inputs: [] as string[] })
-const answers = reactive<Record<string, string>>({})
+const answers = reactive<Record<string, string>>(Object.create(null))
 const labels: Record<string, string> = { DRAFT: '待确认需求', READY: '可以生成设计', GENERATING: '设计生成中', NEEDS_CLARIFICATION: '等待补充说明', REVIEW_PENDING: '设计待审阅', DESIGN_COMMITTED: '设计已提交', COMPLETED: '本轮设计已确认', BLOCKED: '需要处理', CANCELLED: '已取消', QUEUED: '排队中', RUNNING: '生成中', SUCCEEDED: '生成完成', FAILED: '生成失败', pending: '待校验', validated: '校验通过', committed: '已提交', rejected: '已拒绝' }
 const flow = computed(() => detail.value?.flow)
 const proposal = computed(() => detail.value?.proposal)
@@ -26,6 +27,11 @@ const design = computed(() => detail.value?.design)
 const canAct = computed(() => !busy.value && !!actor.value.trim() && !!reason.value.trim())
 const terminal = computed(() => ['COMPLETED', 'CANCELLED'].includes(flow.value?.status))
 const canGenerate = computed(() => ['READY', 'BLOCKED'].includes(flow.value?.status) || (flow.value?.status === 'REVIEW_PENDING' && proposal.value?.status === 'rejected'))
+const clarifying = computed(() => flow.value?.status === 'NEEDS_CLARIFICATION')
+const hasUnsavedAnswers = computed(() => questions.value.some(question => !!answers[question.key]?.trim()))
+const canGenerateConfirmed = computed(() => canGenerate.value || clarifying.value)
+const canSubmitConfirmed = computed(() => canGenerateConfirmed.value && canAct.value && config.value.configured
+  && (!clarifying.value || (confirmedScope.value && !hasUnsavedAnswers.value)))
 const designConfirmed = computed(() => flow.value?.status === 'COMPLETED')
 const requirementNames = computed(() => new Map((detail.value?.requirements || []).map((e: RecordData) => [String(e.id), e.name])))
 let generation = 0, detailGeneration = 0, timer: ReturnType<typeof setTimeout> | undefined
@@ -33,8 +39,11 @@ let answerScope = ''
 
 function nameOf(ids: string[] = []) { return ids.map(id => requirementNames.value.get(id) || '关联需求').join('、') }
 function statusName(value: string) { return value === 'STALE' ? '输入版本已变化' : labels[value] || value || '—' }
+function recordedAnswer(job: RecordData, key: string) {
+  return (job.answers || []).find((answer: RecordData) => answer.key === key)?.answer
+}
 function stopPoll() { if (timer) clearTimeout(timer); timer = undefined }
-function clearAnswers() { Object.keys(answers).forEach(key => delete answers[key]); answerScope = '' }
+function clearAnswers() { Object.keys(answers).forEach(key => delete answers[key]); answerScope = ''; confirmedScope.value = false }
 function schedulePoll() {
   stopPoll()
   if (flow.value?.status === 'GENERATING') timer = setTimeout(() => { void loadDetail(flowId.value, true) }, 2000)
@@ -48,7 +57,10 @@ async function loadDetail(id: string, quiet = false) {
     if (token !== detailGeneration || project !== pid.value || id !== flowId.value) return
     if (String(next.flow.project_id) !== project) throw Error('设计流程不属于当前项目。')
     const oldProposal = proposal.value
-    if (flow.value?.id !== next.flow.id || flow.value?.version !== next.flow.version || oldProposal?.id !== next.proposal?.id || oldProposal?.version !== next.proposal?.version) confirmed.value = false
+    if (flow.value?.id !== next.flow.id || flow.value?.version !== next.flow.version || oldProposal?.id !== next.proposal?.id || oldProposal?.version !== next.proposal?.version) {
+      confirmed.value = false
+      confirmedScope.value = false
+    }
     // 同名问题在下一次模型生成中可能含义已变，历史答复不能自动当作本轮答案。
     const nextAnswerScope = JSON.stringify([next.flow.id, next.flow.state?.active_job_id, next.questions || []])
     if (nextAnswerScope !== answerScope) { clearAnswers(); answerScope = nextAnswerScope }
@@ -131,6 +143,7 @@ async function create() {
 async function action(id: string) {
   if (!flow.value || !canAct.value) return
   if (['commit', 'reject', 'cancel', 'complete'].includes(id) && !confirmed.value) return
+  if (id === 'generate_confirmed' && !canSubmitConfirmed.value) return
   busy.value = true; state.busy = true; error.value = ''; stopPoll()
   try {
     await request(`/design/flows/${flowId.value}/actions/${id}`, {
@@ -138,9 +151,11 @@ async function action(id: string) {
       actor: actor.value.trim(), reason: reason.value.trim(),
     })
     confirmed.value = false
+    confirmedScope.value = false
     await loadDetail(flowId.value)
     const failedValidation = id === 'validate' && proposal.value?.result?.valid === false
-    notify(failedValidation ? '设计提案未通过校验，请查看错误。' : id === 'generate' ? '生成任务已提交，请在此查看进度；不会自动批准设计。' : '操作已记录。', failedValidation ? 'warning' : 'success')
+    const generating = id === 'generate' || id === 'generate_confirmed'
+    notify(failedValidation ? '设计提案未通过校验，请查看错误。' : generating ? '生成任务已提交，请在此查看进度。' : '操作已记录。', failedValidation ? 'warning' : 'success')
   } catch (failure) {
     if (failure instanceof ApiError && failure.status === 409) {
       await loadDetail(flowId.value); confirmed.value = false
@@ -200,18 +215,39 @@ onBeforeUnmount(() => { ++generation; ++detailGeneration; stopPoll() })
           <p class="section-label">流程事件版本 {{ flow.version }}。本轮设计确认后，可在工程工作区关联设计；目前不会自动生成或执行代码。</p>
           <div v-if="flow.status === 'GENERATING'" class="info-box" role="status">模型正在生成设计，页面会更新状态。可取消流程；不会自动校验或提交生成的提案。</div>
           <div v-if="flow.state?.last_error || flow.state?.diagnostic" class="info-box warning">{{ flow.state.last_error || flow.state.diagnostic }}</div>
-          <div v-if="designConfirmed" class="info-box"><strong>本轮需求与设计已确认。</strong> 设计知识和历史已保留；尚未进行代码实现与测试执行。<RouterLink :to="`/projects/${pid}/engineering`">进入工程工作区 →</RouterLink></div>
+          <div v-if="designConfirmed" class="info-box"><strong>本轮需求与设计已确认。</strong> <RouterLink :to="{ path: `/projects/${pid}/engineering`, query: { design: flow.id } }">进入工程工作区生成代码 →</RouterLink></div>
           <details class="editor-box"><summary>本轮固定的需求版本</summary><article v-for="item in detail?.requirements" :key="item.id" class="studio-requirement"><h4>{{ item.name }} · v{{ item.version }}</h4><p>{{ item.description }}</p><ul><li v-for="criterion in item.attributes?.acceptance_criteria" :key="criterion">{{ criterion }}</li></ul></article></details>
         </section>
 
-        <section v-if="questions.length && flow.status === 'NEEDS_CLARIFICATION'" class="panel project-panel">
-          <h3>请补充需求说明</h3><p>模型发现以下问题。填写所有答案后保存，再明确发起下一次生成；系统不会替你默认业务规则。</p>
-          <form @submit.prevent="submitAnswers"><label v-for="question in questions" :key="question.key" class="field">{{ question.question }}<small>关联：{{ nameOf(question.requirement_ids) }}</small><textarea v-model="answers[question.key]" required maxlength="4000" rows="3" :disabled="busy"></textarea></label><p class="section-label">操作署名及依据请在下方“当前流程操作”填写。</p><button class="button primary" :disabled="!canAct || questions.some(q => !answers[q.key]?.trim())">保存补充说明</button></form>
+        <section v-if="questions.length && clarifying" class="panel project-panel">
+          <h3>请补充需求说明</h3><p>可以逐项保存答复，也可以按已确认的范围和已保存答复继续生成。</p>
+          <form @submit.prevent="submitAnswers">
+            <label v-for="question in questions" :key="question.key" class="field">
+              {{ question.question }}
+              <small>关联需求 {{ nameOf(question.requirement_ids) }}</small>
+              <small v-if="question.acceptance_criterion">验收条件 {{ question.acceptance_criterion }}</small>
+              <small v-if="question.acceptance_impact">对验收的影响 {{ question.acceptance_impact }}</small>
+              <small v-if="question.options?.length">备选规则 {{ question.options.join(' / ') }}</small>
+              <textarea v-model="answers[question.key]" required maxlength="4000" rows="3" :disabled="busy"></textarea>
+            </label>
+            <p class="section-label">操作署名及依据请在下方“当前流程操作”填写。</p>
+            <button class="button primary" :disabled="!canAct || questions.some(q => !answers[q.key]?.trim())">保存补充说明</button>
+          </form>
+          <div class="info-box">
+            <p>按已确认范围生成时，模型只追问会改变本轮验收结果的规则。其余问题作为待审阅假设或后续事项。</p>
+            <p v-if="hasUnsavedAnswers" class="section-label">你还有未保存的答复。请补齐并保存，或清空未保存的输入后继续。</p>
+            <label class="check-field"><input v-model="confirmedScope" type="checkbox" :disabled="busy || hasUnsavedAnswers"><span>我确认按当前已保存的范围和答复继续生成。</span></label>
+            <button type="button" class="button secondary" :disabled="!canSubmitConfirmed" @click="action('generate_confirmed')">按已确认范围生成设计</button>
+          </div>
         </section>
 
         <section v-if="design" class="panel project-panel">
           <h3>模型生成的候选设计</h3><p>{{ design.summary }}</p>
           <div v-if="(detail?.assumptions || design.assumptions || []).length" class="info-box warning"><strong>需要审阅的设计假设</strong><ul><li v-for="item in detail?.assumptions || design.assumptions" :key="item">{{ item }}</li></ul><p>这些是假设，需随设计一并确认，不能视作已验证业务事实。</p></div>
+          <div v-if="design.deferred_items?.length" class="info-box">
+            <strong>后续事项</strong>
+            <ul><li v-for="item in design.deferred_items" :key="item">{{ item }}</li></ul>
+          </div>
           <h4 class="studio-section-title">组件职责</h4><div class="design-card-grid"><article v-for="item in design.components" :key="item.key" class="artifact-card"><h4>{{ item.name }}</h4><p>{{ item.description }}</p><p>{{ item.responsibility }}</p><small>关联需求：{{ nameOf(item.requirement_ids) }}</small></article></div>
           <h4 class="studio-section-title">接口设计</h4><article v-for="item in design.interfaces" :key="item.key" class="editor-box"><h4>{{ item.name }} <small>{{ item.protocol }}</small></h4><p>{{ item.description }}</p><details><summary>查看接口契约</summary><pre>{{ JSON.stringify(item.contract, null, 2) }}</pre></details><small>关联需求：{{ nameOf(item.requirement_ids) }}</small></article>
           <h4 class="studio-section-title">数据模型</h4><article v-for="item in design.data_models" :key="item.key" class="editor-box"><h4>{{ item.name }}</h4><p>{{ item.description }}</p><details><summary>查看数据结构</summary><pre>{{ JSON.stringify(item.schema_definition, null, 2) }}</pre></details><small>关联需求：{{ nameOf(item.requirement_ids) }}</small></article>
@@ -228,10 +264,11 @@ onBeforeUnmount(() => { ++generation; ++detailGeneration; stopPoll() })
         <section class="panel project-panel">
           <h3>当前流程操作</h3><p>每一步单独记录。模型生成、提案校验、确认提交和完成设计互相独立。</p>
           <template v-if="!terminal"><label class="field">操作署名<input v-model="actor" required maxlength="100" :disabled="busy"></label><label class="field">操作依据<textarea v-model="reason" required maxlength="2000" rows="3" :disabled="busy" placeholder="说明本次生成或审核所依据的内容"></textarea></label><label class="check-field"><input v-model="confirmed" type="checkbox" :disabled="busy"><span>我已核对当前需求、设计假设及提案差异，确认本次提交、完成或终止操作。</span></label>
-            <p v-if="canGenerate && !config.configured" class="info-box warning">请先在服务端配置模型服务。当前需求可以保存，模型未配置时不会生成设计或使用教学模板代替。</p>
+            <p v-if="canGenerateConfirmed && !config.configured" class="info-box warning">请先在服务端配置模型服务。当前需求可以保存，模型未配置时不会生成设计或使用教学模板代替。</p>
             <div class="studio-actions">
               <button v-if="flow.status === 'DRAFT'" class="button primary" :disabled="!canAct" @click="action('start')">确认需求并启动</button>
               <button v-if="canGenerate" class="button primary" :disabled="!canAct || !config.configured" @click="action('generate')">{{ busy ? '正在处理…' : '生成设计提案' }}</button>
+              <button v-if="canGenerate" class="button secondary" :disabled="!canSubmitConfirmed" @click="action('generate_confirmed')">按已确认范围生成设计</button>
               <button v-if="proposal?.status === 'pending'" class="button secondary" :disabled="!canAct" @click="action('validate')">校验设计提案</button>
               <button v-if="proposal?.status === 'validated'" class="button primary" :disabled="!canAct || !confirmed || diff?.stale" @click="action('commit')">确认提交设计提案</button>
               <button v-if="proposal?.status === 'committed'" class="button primary" :disabled="!canAct || !confirmed" @click="action('complete')">确认本轮设计完成</button>
@@ -242,7 +279,28 @@ onBeforeUnmount(() => { ++generation; ++detailGeneration; stopPoll() })
           <button class="button secondary" :disabled="busy" @click="loadDetail(flowId)">刷新当前流程</button>
         </section>
 
-        <section v-if="detail?.jobs?.length" class="panel project-panel"><h3>模型生成记录</h3><article v-for="job in detail.jobs" :key="job.id" class="editor-box"><div class="studio-heading"><strong>{{ statusName(job.status) }}</strong><small>{{ dateTime(job.created_at) }}</small></div><p v-if="job.diagnostic">{{ job.diagnostic }}</p><dl v-if="job.trace" class="studio-meta"><div><dt>模型</dt><dd>{{ job.trace.model || '—' }}</dd></div><div><dt>提供方</dt><dd>{{ job.trace.provider || '—' }}</dd></div><div><dt>提示版本</dt><dd>{{ job.trace.prompt_version || '—' }}</dd></div></dl><details v-if="job.trace"><summary>查看调用来源与摘要</summary><pre>{{ JSON.stringify(job.trace, null, 2) }}</pre></details></article></section>
+        <section v-if="detail?.jobs?.length" class="panel project-panel">
+          <h3>模型生成记录</h3>
+          <article v-for="job in detail.jobs" :key="job.id" class="editor-box">
+            <div class="studio-heading"><strong>{{ statusName(job.status) }}</strong><small>{{ dateTime(job.created_at) }}</small></div>
+            <p v-if="job.generation_mode === 'confirmed_scope'" class="section-label">按已确认范围生成</p>
+            <p v-if="job.diagnostic">{{ job.diagnostic }}</p>
+            <details v-if="job.questions?.length">
+              <summary>查看原始问题和答复（{{ job.questions.length }} 项）</summary>
+              <ol>
+                <li v-for="question in job.questions" :key="question.key">
+                  <p><strong>模型原始问题</strong> {{ question.question }}</p>
+                  <p v-if="question.acceptance_criterion"><strong>验收条件</strong> {{ question.acceptance_criterion }}</p>
+                  <p v-if="question.acceptance_impact"><strong>对验收的影响</strong> {{ question.acceptance_impact }}</p>
+                  <p v-if="question.options?.length"><strong>备选规则</strong> {{ question.options.join(' / ') }}</p>
+                  <p><strong>人工答复</strong> {{ recordedAnswer(job, question.key) || '未提交答复' }}</p>
+                </li>
+              </ol>
+            </details>
+            <dl v-if="job.trace" class="studio-meta"><div><dt>模型</dt><dd>{{ job.trace.model || '—' }}</dd></div><div><dt>提供方</dt><dd>{{ job.trace.provider || '—' }}</dd></div><div><dt>提示版本</dt><dd>{{ job.trace.prompt_version || '—' }}</dd></div></dl>
+            <details v-if="job.trace"><summary>查看调用来源与摘要</summary><pre>{{ JSON.stringify(job.trace, null, 2) }}</pre></details>
+          </article>
+        </section>
         <section v-if="detail?.history?.length" class="panel project-panel"><details><summary>流程不可变操作历史</summary><article v-for="event in detail.history" :key="event.version" class="editor-box"><strong>v{{ event.version }} · {{ statusName(event.status) }}</strong><p>{{ event.reason }}</p><small>{{ event.actor }} · {{ dateTime(event.recorded_at || event.created_at) }}</small></article></details></section>
       </div>
       <section v-else class="panel empty-state"><h3>{{ loading ? '正在读取需求设计流程…' : '选择或创建一个设计流程' }}</h3><p>已有需求即可开始，无需预先建立组件、接口、代码或测试。</p></section>

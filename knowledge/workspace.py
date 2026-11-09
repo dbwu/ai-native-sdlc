@@ -18,6 +18,7 @@ from pydantic import Field, StringConstraints, model_validator
 
 from .db import connect
 from .models import Text, Version
+from .native_runner import NATIVE_PROFILES, native_runner
 from .runtime_models import RuntimeInput
 from .semantics import KnowledgeError
 from .service import KnowledgeService as KS
@@ -27,12 +28,19 @@ MAX_FILE_BYTES = 256 * 1024
 MAX_SNAPSHOT_BYTES = 1024 * 1024
 LOG_LIMIT = 16384
 REPORT_PREFIX = '__KNOWLEDGE_UNITTEST_RESULT_V1__'
+WorkspaceLanguage = Literal['python', 'c', 'cpp', 'java']
+ExecutionProfile = Literal['python_unittest', 'c_native', 'cpp_native', 'java_native']
+WORKSPACE_PROFILES = {'python': 'python_unittest', 'c': 'c_native', 'cpp': 'cpp_native', 'java': 'java_native'}
+PROFILE_IMAGES = {'python_unittest': 'KNOWLEDGE_EXECUTOR_IMAGE', 'c_native': 'KNOWLEDGE_EXECUTOR_C_IMAGE',
+                  'cpp_native': 'KNOWLEDGE_EXECUTOR_CPP_IMAGE', 'java_native': 'KNOWLEDGE_EXECUTOR_JAVA_IMAGE'}
+PROFILE_LABELS = {'python_unittest': 'Python unittest', 'c_native': 'C11', 'cpp_native': 'C++17', 'java_native': 'Java 17'}
 
 
 class WorkspaceCreate(RuntimeInput):
     name: Annotated[str, Field(min_length=1, max_length=200)] = Field(title='工作区名称')
     actor: Text = Field(title='操作署名')
     design_flow_id: UUID | None = Field(default=None, title='已确认设计流程')
+    language: WorkspaceLanguage = Field(default='python', title='代码生成语言')
 
 
 class WorkspaceFile(RuntimeInput):
@@ -55,7 +63,7 @@ class SnapshotCreate(RuntimeInput):
 class ExecutionCreate(RuntimeInput):
     expected_version: Version = Field(title='预期工作区版本')
     snapshot_id: UUID = Field(title='待执行快照')
-    profile: Literal['python_unittest'] = Field(default='python_unittest', title='服务端固定执行方式')
+    profile: ExecutionProfile | None = Field(default=None, title='固定执行方式，省略时按工作区语言选择')
     actor: Text = Field(title='操作署名')
     reason: Text = Field(title='执行依据')
 
@@ -104,13 +112,13 @@ def snapshot_digest(files):
     return digest(json.dumps(files, ensure_ascii=False, sort_keys=True, separators=(',', ':')))
 
 
-def executor_config():
+def executor_config(profile='python_unittest'):
     backend = os.environ.get('KNOWLEDGE_EXECUTOR', 'disabled')
-    image = os.environ.get('KNOWLEDGE_EXECUTOR_IMAGE', '')
+    image = os.environ.get(PROFILE_IMAGES[profile], '')
     if backend not in ('disabled', 'docker'):
         raise KnowledgeError('KNOWLEDGE_EXECUTOR 仅支持 disabled 或 docker', 503)
     if image and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._/:@-]{0,255}', image):
-        raise KnowledgeError('隔离执行镜像名称无效', 503)
+        raise KnowledgeError(f'{PROFILE_LABELS[profile]} 隔离执行镜像名称无效', 503)
     try:
         timeout = int(os.environ.get('KNOWLEDGE_EXECUTOR_TIMEOUT_SECONDS', '30'))
         if not 1 <= timeout <= 120:
@@ -118,27 +126,46 @@ def executor_config():
     except ValueError as exc:
         raise KnowledgeError('隔离执行超时必须为1至120秒', 503) from exc
     return {'backend': backend, 'image': image, 'timeout_seconds': timeout,
-            'docker': shutil.which('docker'), 'profile': 'python_unittest'}
+            'docker': shutil.which('docker'), 'profile': profile}
 
 
-def executor_status():
-    config = executor_config()
+def _docker_ready(docker):
+    if not docker:
+        return False
+    try:
+        check = subprocess.run([docker, 'info', '--format', '{{.ServerVersion}}'],
+                               capture_output=True, timeout=3, shell=False,
+                               creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        return check.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _executor_status(config, docker_ready):
     configured = config['backend'] == 'docker' and bool(config['image'])
-    available = False
-    message = '隔离执行器尚未配置；不会在平台宿主直接执行工程代码。'
+    available = configured and docker_ready
+    label = PROFILE_LABELS[config['profile']]
+    message = f'{label} 隔离执行器尚未配置。'
     if configured and not config['docker']:
         message = '已配置 Docker 镜像，但本机未找到 Docker 命令；执行接口暂不可用。'
     elif configured:
-        try:
-            check = subprocess.run([config['docker'], 'info', '--format', '{{.ServerVersion}}'],
-                                   capture_output=True, timeout=3, shell=False,
-                                   creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
-            available = check.returncode == 0
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-        message = '隔离执行器可用；仅运行固定 Python unittest 方式，镜像必须已在本机。' if available else 'Docker 服务未就绪，执行接口暂不可用；不会降级到宿主执行。'
+        message = f'{label} 隔离执行器可用，镜像须已在本机。' if available else 'Docker 服务未就绪，执行接口暂不可用。'
     return {k: config[k] for k in ('backend', 'image', 'profile', 'timeout_seconds')} | {
         'configured': configured, 'available': available, 'message': message}
+
+
+def executor_status(profile='python_unittest'):
+    config = executor_config(profile)
+    ready = config['backend'] == 'docker' and bool(config['image']) and _docker_ready(config['docker'])
+    return _executor_status(config, ready)
+
+
+def executor_statuses():
+    configs = [executor_config(profile) for profile in PROFILE_IMAGES]
+    docker = next((config['docker'] for config in configs if config['backend'] == 'docker' and config['image']), None)
+    ready = _docker_ready(docker)
+    profiles = {config['profile']: _executor_status(config, ready) for config in configs}
+    return profiles['python_unittest'] | {'profiles': profiles}
 
 
 # 固定的外层测试入口从 unittest 的结果对象读取数量，不根据工程打印的“通过”文字判断。
@@ -153,11 +180,17 @@ sys.exit(0 if report['successful'] and report['tests_run']>0 else 1)
 
 
 def docker_command(config, directory, name, image_id, nonce=''):
-    runner = RUNNER.replace(REPORT_PREFIX, REPORT_PREFIX + nonce + '_') if nonce else RUNNER
+    profile = config.get('profile', 'python_unittest')
+    prefix = REPORT_PREFIX + nonce + '_' if nonce else REPORT_PREFIX
+    native = profile in NATIVE_PROFILES
+    runner = native_runner(profile, prefix) if native else RUNNER.replace(REPORT_PREFIX, prefix)
+    memory = '512m' if native else '256m'
+    build = ['--tmpfs=/build:rw,exec,nosuid,nodev,size=64m,mode=1777', '--ulimit=core=0:0'] if native else []
     return [config['docker'], 'run', '--rm', '--pull=never', '--name', name,
             '--network=none', '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges',
-            '--user=65534:65534', '--pids-limit=64', '--cpus=1', '--memory=256m', '--memory-swap=256m',
+            '--user=65534:65534', '--pids-limit=64', '--cpus=1', '--memory=' + memory, '--memory-swap=' + memory,
             '--tmpfs=/tmp:rw,noexec,nosuid,nodev,size=64m',
+            *build,
             '--mount', f'type=bind,source={directory},target=/workspace,readonly',
             '--workdir=/workspace', '--entrypoint=python', image_id, '-I', '-B', '-c', runner]
 
@@ -184,6 +217,59 @@ class _BoundedCapture:
             if len(self.tail) > LOG_LIMIT * 2:
                 del self.tail[:-LOG_LIMIT * 2]
 
+    def log(self):
+        if self.size <= LOG_LIMIT:
+            data = self.head
+        else:
+            marker = '\n… 日志中间已省略 …\n'.encode('utf-8')
+            first = LOG_LIMIT // 2
+            last = LOG_LIMIT - first - len(marker)
+            data = self.head[:first] + marker + self.tail[-last:]
+        # PostgreSQL JSONB 无法存储 NUL，保留它在日志中的可见表示。
+        return data.decode('utf-8', errors='replace').replace('\x00', r'\x00')
+
+
+def _native_result(report, profile, returncode):
+    """只接受固定运行器可产生的、与容器退出码相符的阶段结果。"""
+    if report['profile'] != profile:
+        return {}
+    compile_status, test_status = report['compile_status'], report['test_status']
+    compile_code, test_code = report['compile_returncode'], report['test_returncode']
+    count = report['tests_run']
+    if type(count) is not int or not 0 <= count <= MAX_FILES:
+        return {}
+    if any(code is not None and type(code) is not int for code in (compile_code, test_code)):
+        return {}
+    errors = report['errors']
+    if type(errors) is not int or not 0 <= errors <= MAX_FILES:
+        return {}
+    compiled = (compile_status, compile_code) == ('passed', 0)
+    compile_not_run = (compile_status, compile_code) == ('not_run', None)
+    if (returncode == 0 and compiled and (test_status, test_code) == ('passed', 0)
+            and count > 0 and report['successful'] is True and errors == 0
+            and type(report['failures']) is int and report['failures'] == 0):
+        error = ''
+    elif returncode == 2 and (compile_status, test_status) == ('failed', 'not_run') and compile_code not in (None, 0) and test_code is None and count == 0:
+        error = '编译失败，测试未运行。请查看编译日志。'
+    elif (returncode == 3 and compiled and test_status == 'failed'
+          and ((test_code not in (None, 0) and count > 0) or (test_code is None and errors > 0))):
+        error = '编译通过，但测试程序失败。请查看测试日志。'
+    elif returncode == 4 and (compiled or compile_not_run) and (test_status, test_code) == ('no_tests', None) and count == 0:
+        test_status = 'not_run'
+        error = '编译通过，但未发现符合约定的测试入口。请查看日志。' if compiled else '没有找到可编译的源文件或测试入口。'
+    elif returncode == 5 and (compiled or compile_not_run) and (test_status, test_code) == ('not_run', None):
+        error = {'tool_missing': '隔离执行镜像缺少编译或运行工具。',
+                 'launch_failed': '隔离执行器无法准备构建目录或启动工具。',
+                 'report_protection_failed': '隔离执行器无法保护结果记录，执行已停止。'}.get(report.get('error'))
+        if error is None:
+            return {}
+        test_status = None if compiled else 'not_run'
+    else:
+        return {}
+    return {'passed': returncode == 0, 'tests_run': count, 'error': error,
+            'compile_status': compile_status, 'test_status': test_status,
+            'compile_returncode': compile_code, 'test_returncode': test_code}
+
 
 def run_isolated(files, config, cancelled=lambda: False):
     """无知识库事务地运行固定容器；只读工程、无网络、限资源且始终清理容器。"""
@@ -191,6 +277,10 @@ def run_isolated(files, config, cancelled=lambda: False):
     result = {'passed': False, 'tests_run': 0, 'returncode': None, 'stdout': '', 'stderr': '',
               'error': '', 'output_truncated': False, 'cancelled': False, 'timed_out': False,
               'duration_ms': 0, 'image_id': None}
+    profile = config.get('profile', 'python_unittest')
+    native = profile in NATIVE_PROFILES
+    if native:
+        result.update(compile_status=None, test_status=None, compile_returncode=None, test_returncode=None)
     name = 'knowledge-engineering-' + uuid4().hex
     nonce = uuid4().hex
     report_prefix = REPORT_PREFIX + nonce + '_'
@@ -245,25 +335,32 @@ def run_isolated(files, config, cancelled=lambda: False):
             _remove_container(config, name)
             for reader in readers:
                 reader.join(timeout=2)
-            result.update(returncode=process.returncode, stdout=out.head.decode('utf-8', errors='replace'),
-                          stderr=err.head.decode('utf-8', errors='replace'),
+            stdout = out.log()
+            if native:
+                stdout = '\n'.join(line for line in stdout.splitlines() if not line.startswith(report_prefix))
+            result.update(returncode=process.returncode, stdout=stdout,
+                          stderr=err.log(),
                           output_truncated=out.size > LOG_LIMIT or err.size > LOG_LIMIT)
             reports = [line.removeprefix(report_prefix) for line in out.tail.decode('utf-8', errors='replace').splitlines()
                        if line.startswith(report_prefix)]
-            if reports:
+            if reports and not result['cancelled'] and not result['timed_out']:
                 try:
                     report = json.loads(reports[-1])
-                    count = report['tests_run']
-                    valid = (type(count) is int and 0 < count < 100000 and report['successful'] is True
-                             and type(report['failures']) is int and report['failures'] == 0
-                             and type(report['errors']) is int and report['errors'] == 0
-                             and type(report['skipped']) is int and 0 <= report['skipped'] < count)
-                    result['tests_run'] = count if type(count) is int and count >= 0 else 0
-                    result['passed'] = bool(valid and process.returncode == 0 and not result['cancelled'] and not result['timed_out'])
+                    if native:
+                        result.update(_native_result(report, profile, process.returncode))
+                    else:
+                        count = report['tests_run']
+                        valid = (type(count) is int and 0 < count < 100000 and report['successful'] is True
+                                 and type(report['failures']) is int and report['failures'] == 0
+                                 and type(report['errors']) is int and report['errors'] == 0
+                                 and type(report['skipped']) is int and 0 <= report['skipped'] < count)
+                        result['tests_run'] = count if type(count) is int and count >= 0 else 0
+                        result['passed'] = bool(valid and process.returncode == 0)
                 except (ValueError, KeyError, TypeError):
                     pass
             if not result['passed'] and not result['error']:
-                result['error'] = '测试未通过、未发现实际测试或执行报告不完整，请查看日志。'
+                result['error'] = ('隔离编译或测试未能完成，请查看日志和镜像配置。' if native else
+                                   '测试未通过、未发现实际测试或执行报告不完整，请查看日志。')
     except (OSError, subprocess.SubprocessError, KnowledgeError) as exc:
         result['error'] = '隔离执行未能完成：' + type(exc).__name__
     finally:
@@ -312,8 +409,8 @@ class WorkspaceService:
                 if flow['status'] != 'COMPLETED':
                     raise KnowledgeError('请先明确确认设计流程，再建立关联工程工作区', 409)
             workspace_id = uuid4()
-            conn.execute('INSERT INTO engineering_workspace(id,project_id,design_flow_id,name,actor) VALUES(%s,%s,%s,%s,%s)',
-                         (workspace_id, project_id, request.design_flow_id, request.name, request.actor))
+            conn.execute('INSERT INTO engineering_workspace(id,project_id,design_flow_id,name,actor,language) VALUES(%s,%s,%s,%s,%s,%s)',
+                         (workspace_id, project_id, request.design_flow_id, request.name, request.actor, request.language))
             self._event(conn, {'id': workspace_id}, 'created', request.actor, '明确建立工程工作区；尚未生成或执行代码')
             return self._workspace(conn, workspace_id)
 
@@ -326,9 +423,23 @@ class WorkspaceService:
 
     def _detail(self, conn, workspace_id):
         workspace = self._workspace(conn, workspace_id)
-        snapshot = conn.execute('SELECT * FROM engineering_snapshot WHERE workspace_id=%s ORDER BY version DESC LIMIT 1', (workspace_id,)).fetchone()
+        snapshot = self._latest_snapshot(conn, workspace_id)
         executions = conn.execute('SELECT * FROM current_engineering_executions WHERE workspace_id=%s ORDER BY created_at DESC,id LIMIT 100', (workspace_id,)).fetchall()
         return {'workspace': workspace, 'latest_snapshot': snapshot, 'executions': executions}
+
+    @staticmethod
+    def _latest_snapshot(conn, workspace_id):
+        return conn.execute('SELECT * FROM engineering_snapshot WHERE workspace_id=%s ORDER BY version DESC LIMIT 1', (workspace_id,)).fetchone()
+
+    def _save_snapshot(self, conn, workspace, files, actor, reason, *, action='snapshot_saved'):
+        workspace_id = workspace['id']
+        latest = conn.execute('SELECT coalesce(max(version),0)+1 AS v FROM engineering_snapshot WHERE workspace_id=%s', (workspace_id,)).fetchone()['v']
+        snapshot_id = uuid4()
+        self._event(conn, workspace, action, actor, reason)
+        conn.execute('''INSERT INTO engineering_snapshot(id,workspace_id,version,workspace_version,sha256,files,actor,reason)
+            VALUES(%s,%s,%s,%s,%s,%s,%s,%s)''',
+                     (snapshot_id, workspace_id, latest, workspace['version'] + 1, snapshot_digest(files), Jsonb(files), actor, reason))
+        return snapshot_id
 
     def detail(self, workspace_id):
         with connect(self.database_url) as conn:
@@ -344,33 +455,32 @@ class WorkspaceService:
             workspace = self._workspace(conn, workspace_id)
             if workspace['version'] != request.expected_version:
                 raise KnowledgeError('工作区版本已变化，请刷新后重新审阅快照', 409)
-            latest = conn.execute('SELECT coalesce(max(version),0)+1 AS v FROM engineering_snapshot WHERE workspace_id=%s', (workspace_id,)).fetchone()['v']
-            self._event(conn, workspace, 'snapshot_saved', request.actor, request.reason)
-            conn.execute('''INSERT INTO engineering_snapshot(id,workspace_id,version,workspace_version,sha256,files,actor,reason)
-                VALUES(%s,%s,%s,%s,%s,%s,%s,%s)''',
-                         (uuid4(), workspace_id, latest, workspace['version'] + 1, snapshot_digest(files), Jsonb(files), request.actor, request.reason))
+            self._save_snapshot(conn, workspace, files, request.actor, request.reason)
             return self._detail(conn, workspace_id)
 
     def execute(self, workspace_id, request):
-        status = executor_status()
-        if not status['available']:
-            raise KnowledgeError(status['message'], 503)
-        config = executor_config()
         with connect(self.database_url) as conn:
             workspace = self._workspace(conn, workspace_id)
+            profile = WORKSPACE_PROFILES[workspace['language']]
+            if request.profile is not None and request.profile != profile:
+                raise KnowledgeError('隔离执行方式与当前工作区的代码语言不匹配', 409)
+            status = executor_status(profile)
+            if not status['available']:
+                raise KnowledgeError(status['message'], 503)
+            config = executor_config(profile)
             KS._lock(conn, workspace['project_id'])
             KS._assert_project(conn, workspace['project_id'])
             workspace = self._workspace(conn, workspace_id)
             if workspace['version'] != request.expected_version:
                 raise KnowledgeError('工作区版本已变化，请刷新后重新执行', 409)
-            snapshot = conn.execute('SELECT * FROM engineering_snapshot WHERE workspace_id=%s ORDER BY version DESC LIMIT 1', (workspace_id,)).fetchone()
+            snapshot = self._latest_snapshot(conn, workspace_id)
             if snapshot is None or snapshot['id'] != request.snapshot_id:
                 raise KnowledgeError('仅能执行当前工作区的最新明确快照', 409)
             execution_id = uuid4()
             version = workspace['version'] + 1
             conn.execute('''INSERT INTO engineering_execution(id,workspace_id,snapshot_id,snapshot_sha256,workspace_version,profile,actor,reason,environment)
                 VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
-                         (execution_id, workspace_id, snapshot['id'], snapshot['sha256'], version, request.profile, request.actor, request.reason,
+                         (execution_id, workspace_id, snapshot['id'], snapshot['sha256'], version, profile, request.actor, request.reason,
                           Jsonb({key: config[key] for key in ('backend', 'image', 'timeout_seconds', 'profile')})))
             self._event(conn, workspace, 'execution_started', request.actor, request.reason)
             conn.execute('''INSERT INTO engineering_execution_event(execution_id,version,status,actor,reason,result)
@@ -394,6 +504,10 @@ class WorkspaceService:
                 final_status = 'CANCELLED'
             elif result.get('timed_out'):
                 final_status = 'TIMED_OUT'
+            elif result.get('compile_status') == 'failed':
+                final_status = 'COMPILE_FAILED'
+            elif result.get('test_status') == 'failed':
+                final_status = 'TEST_FAILED'
             else:
                 final_status = 'SUCCEEDED' if result['passed'] else 'FAILED'
             conn.execute('''INSERT INTO engineering_execution_event(execution_id,version,status,actor,reason,result)

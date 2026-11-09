@@ -31,6 +31,12 @@ class Clarification(RuntimeInput):
     requirement_ids: RequirementIds
 
 
+class AcceptanceClarification(Clarification):
+    acceptance_criterion: Text = Field(title="原样引用会受影响的现有验收条件")
+    acceptance_impact: Text = Field(title="不同规则会如何改变验收结果")
+    options: list[Text] = Field(min_length=2, max_length=5, title="会导致不同验收结果的待确认选项")
+
+
 class Answer(RuntimeInput):
     key: Key
     answer: Text
@@ -71,6 +77,7 @@ class DesignDocument(RuntimeInput):
     summary: Text
     questions: list[Clarification] = Field(default_factory=list, max_length=20)
     assumptions: list[Text] = Field(default_factory=list, max_length=20)
+    deferred_items: list[Text] = Field(default_factory=list, max_length=20, title="后续事项，不属于当前设计范围")
     components: list[ComponentDesign] = Field(default_factory=list, max_length=20)
     interfaces: list[InterfaceDesign] = Field(default_factory=list, max_length=20)
     data_models: list[DataDesign] = Field(default_factory=list, max_length=20)
@@ -93,3 +100,7 @@ class DesignDocument(RuntimeInput):
         if any(item.component_key not in components for item in [*self.interfaces, *self.data_models]):
             raise ValueError("接口和数据模型必须引用本次设计中存在的组件")
         return self
+
+
+class ConfirmedScopeDesign(DesignDocument):
+    questions: list[AcceptanceClarification] = Field(default_factory=list, max_length=20)

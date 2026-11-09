@@ -3,8 +3,9 @@ from uuid import UUID
 
 from fastapi import APIRouter
 
+from .code_generation import CodeGenerationAction, CodeGenerationService
 from .workspace import (ExecutionCancel, ExecutionCreate, SnapshotCreate, WorkspaceCreate,
-                        WorkspaceService, executor_status)
+                        WorkspaceService, executor_statuses)
 
 
 def workspace_router(url_provider):
@@ -13,9 +14,12 @@ def workspace_router(url_provider):
     def service():
         return WorkspaceService(url_provider())
 
+    def code_service():
+        return CodeGenerationService(url_provider())
+
     @router.get('/executor', summary='查询隔离执行器配置与可用状态')
     def executor():
-        return executor_status()
+        return executor_statuses()
 
     @router.get('/projects/{project_id}/workspaces', summary='查询项目工程工作区')
     def workspaces(project_id: UUID):
@@ -32,6 +36,23 @@ def workspace_router(url_provider):
     @router.post('/workspaces/{workspace_id}/snapshots', status_code=201, summary='保存完整不可变工程文件快照')
     def snapshot(workspace_id: UUID, body: SnapshotCreate):
         return service().snapshot(workspace_id, body)
+
+    @router.get('/workspaces/{workspace_id}/code-generations', summary='查看工作区代码生成记录')
+    def code_generations(workspace_id: UUID):
+        return code_service().generations(workspace_id)
+
+    @router.post('/workspaces/{workspace_id}/code-generations', status_code=202, summary='从已确认设计排队生成代码候选')
+    def generate_code(workspace_id: UUID, body: CodeGenerationAction):
+        return code_service().enqueue(workspace_id, body)
+
+    @router.get('/workspaces/{workspace_id}/code-generations/{generation_id}', summary='查看代码候选文件差异')
+    def code_generation(workspace_id: UUID, generation_id: UUID):
+        return code_service().generation(workspace_id, generation_id)
+
+    @router.post('/workspaces/{workspace_id}/code-generations/{generation_id}/apply', status_code=201,
+                 summary='明确确认代码候选并保存为不可变工程快照')
+    def apply_code(workspace_id: UUID, generation_id: UUID, body: CodeGenerationAction):
+        return code_service().apply(workspace_id, generation_id, body)
 
     @router.post('/workspaces/{workspace_id}/executions', status_code=201, summary='在隔离容器实际执行固定测试方式')
     def execute(workspace_id: UUID, body: ExecutionCreate):

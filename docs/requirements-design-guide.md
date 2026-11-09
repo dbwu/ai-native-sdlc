@@ -1,12 +1,12 @@
-# 自建需求与模型设计使用指南
+# 自建需求、模型设计与代码生成使用指南
 
 本里程碑支持从页面自建需求，只绑定需求即可启动设计流程。配置的模型服务读取固定版本的需求与设计依据，提出澄清问题或形成组件、接口、数据模型和测试计划候选，再由人审阅并确认。原有选课与订单教学流程继续保留。
 
-本流程只有“需求确认”和“设计生成与审阅”两个阶段。确认完成表示本轮设计已保存，不表示代码已实现、应用已生成或测试已通过。工程工作区和隔离执行接口为后续代码生成提供基础，目前可以手工保存文本工程并请求固定测试方式执行。
+需求设计流程包含“需求确认”和“设计生成与审阅”两个阶段。确认设计完成后，可在关联的工程工作区生成 Python、C、C++ 或 Java 代码，审阅变更并确认保存快照。配置对应的 Docker 镜像后，四种语言均可运行隔离测试，C、C++ 和 Java 会单独显示编译结果。
 
 ## 启动服务与新增迁移
 
-已有数据库需要执行新增的 `005_design_generation.sql` 与 `006_engineering_workspace.sql`。在项目根目录、已安装项目依赖的 Python 环境中执行：
+更新后，迁移 `009_native_execution.sql` 增加 C、C++ 和 Java 的执行方式，以及编译失败和测试失败状态。迁移 `008_workspace_language.sql` 为工作区增加语言设置，已有工作区按 Python 处理。此前尚未应用的迁移会按顺序执行。在项目根目录、已安装项目依赖的 Python 环境中运行以下命令。
 
 ```powershell
 $env:DATABASE_URL = 'postgresql://knowledge:local-dev-only@127.0.0.1:5432/knowledge'
@@ -38,11 +38,13 @@ python -m uvicorn knowledge.api:app --host 127.0.0.1 --port 8000
 | `KNOWLEDGE_MODEL_API_KEY` | 空 | 服务端密钥，不提交到版本库，不返回给页面 |
 | `KNOWLEDGE_MODEL_REQUIRE_KEY` | `true` | 云端通常保留 `true`；无鉴权的本地服务可明确设为 `false` |
 | `KNOWLEDGE_MODEL_RESPONSE_FORMAT` | `json_object` | 可选 `json_object`、`json_schema`、`none`，见下文 |
-| `KNOWLEDGE_MODEL_TIMEOUT_SECONDS` | `60` | 调用超时，允许1至300秒 |
+| `KNOWLEDGE_MODEL_TIMEOUT_SECONDS` | `60` | 每次模型请求的网络等待超时，允许 1 至 300 秒 |
 | `KNOWLEDGE_MODEL_MAX_OUTPUT_TOKENS` | `8192` | 输出上限，允许256至32768；实际还受所选服务及模型限制 |
 | `KNOWLEDGE_MODEL_TOKEN_PARAMETER` | `max_completion_tokens` | 旧兼容服务需要时可明确改为 `max_tokens` |
 
-`BASE_URL` 仅接受HTTP或HTTPS，不接受内嵌用户名、密码、查询参数或片段。密钥应通过独立变量提供；远程服务宜使用HTTPS。系统不跟随重定向，不自动更换模型、输出模式或端点，也不自动重试可能计费的请求。
+`BASE_URL` 仅接受HTTP或HTTPS，不接受内嵌用户名、密码、查询参数或片段。密钥应通过独立变量提供；远程服务宜使用HTTPS。重试使用同一模型、输出模式和端点。首次请求超时后，模型服务仍可能完成处理，因此两次请求可能分别计费。
+
+若 60 秒不足，可在启动平台的 PowerShell 中先执行 `$env:KNOWLEDGE_MODEL_TIMEOUT_SECONDS = '180'`，再按原方式启动 API。使用独立 worker 时也设置相同的值并重启。使用 Docker Compose 时，在项目 `.env` 设置 `KNOWLEDGE_MODEL_TIMEOUT_SECONDS=180`，再执行 `docker compose up -d --build api`。打开平台的 `/design/config`，确认 `timeout_seconds` 为 `180`，然后回到原流程再次点击“生成设计提案”。该设置控制平台到模型服务的网络等待，模型服务或代理的超时由它们各自配置。
 
 三种输出模式的区别：
 
@@ -144,6 +146,17 @@ python -m uvicorn knowledge.api:app --host 127.0.0.1 --port 8000
 
 答复会保存在本流程的不可变记录及后续生成上下文中，不会静默改写原需求实体。如果需要正式修改原需求，应在项目知识中提出新修订，再基于新版本创建设计流程。
 
+### 按已确认范围收敛设计
+
+如果验收规则已经明确，但模型仍在追问接口命名等细节，可以在原流程发起“按已确认范围生成设计”。生成会沿用流程固定的需求、设计依据及历次已保存答复。模型按已确认的范围形成设计，只有遇到会改变本轮验收结果的未决业务规则才继续追问。实现细节可以列为待审阅假设，范围之外的事项列为后续事项。
+
+1. 在“当前流程操作”填写操作署名和依据，例如“容量上限与拒绝条件已确认，先形成可审阅的设计”。使用“按已确认范围生成设计”时，本次操作依据也会作为生成参考。
+2. 如果流程显示“等待补充说明”，在“请补充需求说明”中勾选“我确认按当前已保存的范围和答复继续生成”，再点击“按已确认范围生成设计”。若已输入新答复，先填完并点击“保存补充说明”。保存后可在“当前流程操作”直接点击同名按钮。仍未填写的旧问题可交由这次生成重新判断是否会影响验收。
+3. 如果出现新的关键问题，核对它引用的本轮验收条件，以及不同选择会带来的验收结果。例如“满员时是拒绝还是进入候补”会改变验收结果。无需为这轮设计决定接口路径如何命名。如果没有这样的未决规则，流程进入“设计待审阅”。
+4. 展开“模型生成记录”中对应任务的“查看原始问题和答复”，核对模型当时提出的问题和后来保存的人工答复。未答复的问题与已保存的答复分开显示。再次生成后仍可回查之前的任务。
+
+该操作沿用当前流程绑定的需求。若需要把某条已绑定需求拆出本轮范围，先在项目知识中拆分需求，再按目标范围创建流程。
+
 ### 审阅并确认候选设计
 
 没有待澄清问题时，页面显示“设计待审阅”及“模型生成的候选设计”。
@@ -151,7 +164,7 @@ python -m uvicorn knowledge.api:app --host 127.0.0.1 --port 8000
 1. 阅读设计摘要、组件职责和关联需求。
 2. 展开“查看接口契约”“查看数据结构”，检查计数口径与数据约束是否相符。若业务不需要接口或持久化模型，可以没有这些条目；应核对设计摘要中的说明。
 3. 阅读“测试计划（尚未执行）”，核对成功、超限、重复请求和学生隔离等计划。计划不能作为实际测试通过证明。
-4. 特别检查“需要审阅的设计假设”，确认没有未经批准的学校政策、权限或收费要求。
+4. 检查“需要审阅的设计假设”和候选中列出的后续事项，确认没有未经批准的学校政策、权限或收费要求，也没有把本轮验收要求移到后续。
 5. 在“设计知识提案与差异”展开“展开修改前与候选内容”，核对即将新增的实体和关系。
 6. 在“当前流程操作”填写署名及依据，点击“校验设计提案”。成功后提案状态为“校验通过”。
 7. 再次核对差异，填写依据，勾选“我已核对当前需求、设计假设及提案差异，确认本次提交、完成或终止操作。”，点击“确认提交设计提案”。
@@ -187,17 +200,33 @@ python -m knowledge.design_worker
 | 情况 | 处理方式 |
 |---|---|
 | 未配置模型 | 显示未配置，不调用真实服务，也不使用假数据或教学模板替代 |
-| 认证失败、限流、超时、拒绝或非法JSON | 保存安全中文诊断，流程需要处理；不会自动重试、换模型或产生设计提案 |
+| 请求超时或 HTTP 408、500、502、503、504 | 等待 2 秒后在同一任务内重试一次。重试前检查任务状态和知识版本，失败原因可在“模型生成记录”查看 |
+| 认证失败、限流、拒绝或非法 JSON | 直接记录中文诊断，待处理后由用户明确重新生成 |
 | 需求或设计依据已有新版本 | 旧结果不能发布或提交，应基于新版本重新建立流程 |
-| API或worker重启 | 排队任务保留，可继续领取；已运行任务超过10分钟后仅标为失败，不自动再次调用模型 |
-| 需要重新生成 | 用户明确点击；每个流程最多5次发起，包括澄清后的再次生成及失败重试 |
+| API或worker重启 | 排队任务保留，可继续领取。已开始的任务超过恢复时限后标为失败，之后由用户发起新的生成 |
+| 需要重新生成 | 根据当前状态明确点击“生成设计提案”或“按已确认范围生成设计”。同一流程没有累计次数上限，历史记录保留 |
 | 取消设计流程 | 取消状态与历史保留，晚返回内容不发布；不保证停止已发出的远程请求或服务计费 |
 
-“模型生成记录”可查看状态、模型、提示版本及输入输出摘要；“流程不可变操作历史”记录每次确认和处理。密钥不会返回页面。配置已齐全、模型已返回、提案已校验、提案已提交和本轮设计已确认分别是不同状态。
+“模型生成记录”可查看每轮状态、模型、提示版本、输入输出摘要、原始澄清问题和后来保存的答复。“流程不可变操作历史”记录每次确认和处理。密钥不会返回页面。配置已齐全、模型已返回、提案已校验、提案已提交和本轮设计已确认分别是不同状态。
 
-## 工程工作区与隔离执行基础
+## 从已确认的设计生成代码并运行测试
 
-设计完成后可点击“进入工程工作区 →”，或使用左侧“工程工作区”。它目前支持手工文本文件和不可变快照，尚未根据模型设计自动生成业务代码、安装依赖或开放业务应用预览。
+1. 确认需求设计页显示“本轮设计已确认”，点击“进入工程工作区生成代码 →”。页面优先打开已关联这份设计的工作区。要用其他语言，点击“新建工程工作区”，在“代码语言”选择 C、C++、Java 或 Python，在“关联已确认设计”选择同一份设计，再填写名称和操作署名并点击“创建工程工作区”。创建后语言固定，原工作区的快照仍可查看。
+2. 在工作区填写操作署名和本次生成依据，到“代码生成与审阅”点击“生成代码候选”。例如可填“按已确认设计实现选课数量上限，覆盖未达上限、达到上限及重复请求”。开始前保存打算作为基线的本地编辑。模型按工作区语言生成，收到的上下文包含已确认的设计、固定版本的需求、设计产物版本、当前已保存的工作区文件及本次生成依据。
+3. 候选生成后点击“审阅代码变更”，逐项查看新增或修改的文件和前后差异。对照设计核对规则、边界条件以及测试断言。当前只生成新增和修改，其他已保存文件会保留。候选不符合预期时，可调整生成依据后重新发起。
+4. 核对全部变更后勾选审阅确认框，点击“确认保存到工程工作区”。检查“当前文件快照”的版本与摘要，确保页面已切换到新快照。保存时会再次检查生成所用的设计和文件基线。若工作区已有更新，刷新并基于最新快照重新生成。若设计引用的知识已有新版本，则先确认新版设计，再用关联新版设计的工作区生成。
+5. 对应语言的执行器可用后，填写本次执行依据，点击“执行当前已保存快照”。在“真实执行记录”中对照快照摘要、测试数量、退出码及日志。C、C++ 和 Java 还会分别显示编译状态和测试状态。“执行通过”、退出码 `0` 且实际运行测试数大于零，表示该快照通过了这组测试。逐条核对断言覆盖的需求，尤其要检查由模型同时生成的代码和测试。
+
+工作区语言决定模型可新增或修改的文件类型。
+
+| 工作区语言 | 代码候选支持的文件后缀 |
+|---|---|
+| Python | `.py` |
+| C | `.c`、`.h` |
+| C++ | `.cpp`、`.cc`、`.cxx`、`.h`、`.hpp`、`.hh`、`.hxx` |
+| Java | `.java` |
+
+代码生成沿用需求设计的模型配置和后台 worker。隔离执行需另外配置 Docker。若生成记录显示模型输出截断，可在模型允许的范围内调高 `KNOWLEDGE_MODEL_MAX_OUTPUT_TOKENS`，或缩小本轮改动范围后重新发起。
 
 ### 创建并保存手工工程快照
 
@@ -214,22 +243,53 @@ python -m knowledge.design_worker
 
 | 环境变量 | 默认值 | 含义 |
 |---|---|---|
-| `KNOWLEDGE_EXECUTOR` | `disabled` | `disabled`不执行；`docker`启用固定Docker执行方式 |
-| `KNOWLEDGE_EXECUTOR_IMAGE` | 空 | 维护者已在本机准备好的Python执行镜像标签或摘要 |
-| `KNOWLEDGE_EXECUTOR_TIMEOUT_SECONDS` | `30` | 执行超时，允许1至120秒 |
+| `KNOWLEDGE_EXECUTOR` | `disabled` | 设置为 `docker` 启用隔离执行 |
+| `KNOWLEDGE_EXECUTOR_IMAGE` | 空 | Python 执行镜像 |
+| `KNOWLEDGE_EXECUTOR_C_IMAGE` | 空 | C 执行镜像，包含 Python 和 C 编译器 |
+| `KNOWLEDGE_EXECUTOR_CPP_IMAGE` | 空 | C++ 执行镜像，包含 Python 和 C++ 编译器 |
+| `KNOWLEDGE_EXECUTOR_JAVA_IMAGE` | 空 | Java 执行镜像，包含 Python 和 JDK 17 |
+| `KNOWLEDGE_EXECUTOR_TIMEOUT_SECONDS` | `30` | 单次执行总时限，涵盖编译与测试，允许 1 至 120 秒 |
 
-维护者先准备可用的Docker服务，以及包含Python和所需依赖的本地镜像，再设置并重启API：
+在运行 API 的主机上启动 Docker，并准备所需语言的本地镜像。默认 Compose 的 API 容器内隔离执行处于关闭状态。若正在使用默认 Compose，可运行 `docker compose stop api` 停止原 API，并用 `docker compose up -d db` 保留同一个数据库，再在能调用本机 Docker 的终端启动原生 Python API。原生 API 须沿用数据库和模型的进程环境变量，启动前执行迁移并确保前端产物已经构建。
+
+在项目根目录运行以下 PowerShell 命令。只需准备打算使用的镜像，C 和 C++ 可以共享同一个镜像。
 
 ```powershell
+docker pull python:3.12-slim
+docker build -f Dockerfile.native --target c-cpp -t knowledge-c-cpp:local .
+docker build -f Dockerfile.native --target java -t knowledge-java:local .
 $env:KNOWLEDGE_EXECUTOR = 'docker'
-$env:KNOWLEDGE_EXECUTOR_IMAGE = 'knowledge-python-unittest:local'
+$env:KNOWLEDGE_EXECUTOR_IMAGE = 'python:3.12-slim'
+$env:KNOWLEDGE_EXECUTOR_C_IMAGE = 'knowledge-c-cpp:local'
+$env:KNOWLEDGE_EXECUTOR_CPP_IMAGE = 'knowledge-c-cpp:local'
+$env:KNOWLEDGE_EXECUTOR_JAVA_IMAGE = 'knowledge-java:local'
 $env:KNOWLEDGE_EXECUTOR_TIMEOUT_SECONDS = '30'
+python -m knowledge.db
 python -m uvicorn knowledge.api:app --host 127.0.0.1 --port 8000
 ```
 
-示例镜像名需换成已经存在的实际镜像。系统执行时采用 `--pull=never`，不会自动拉取镜像或安装依赖。当前仅支持服务端固定的 `python_unittest`：发现 `test*.py` 并运行Python unittest；不接受页面传入命令、镜像、宿主路径或任意执行方式。
+镜像配置可使用本地标签或摘要。系统执行时采用 `--pull=never`。工作区语言决定使用哪一种预设，编译器、测试入口和镜像均由服务端固定。依赖须在构建镜像时准备完毕。
 
-执行容器无网络、只读工程挂载、非root用户、只读根文件系统，并限制进程、CPU、内存和时间。执行时不持有项目事务，容器结束、取消或超时后尝试清理。Docker未就绪时明确报不可用，不降级到宿主机执行。
+执行容器无网络、只读工程挂载、以非 root 用户运行，根文件系统只读，并限制进程、CPU、内存和时间。编译产物写入容器临时目录。执行时不持有项目事务，容器结束、取消或超时后尝试清理。Docker 未就绪时页面会提示对应语言执行器不可用。
+
+### 编译与测试文件约定
+
+| 工作区语言 | 业务文件 | 测试入口 |
+|---|---|---|
+| Python | Python 模块 | 可被 `unittest` 发现的 `test*.py` |
+| C | `src/` 下的 `.c`，头文件放入 `include/` | `tests/test_*.c`，每个文件有独立的 `main` |
+| C++ | `src/` 下的 `.cpp`、`.cc` 或 `.cxx`，头文件放入 `include/` | `tests/test_*.cpp`、`tests/test_*.cc` 或 `tests/test_*.cxx`，每个文件有独立的 `main` |
+| Java | `src/main/java/` 下的 `.java`，包名与相对路径对应 | `src/test/java/` 下的 `*Test.java`，包含 `public static void main(String[] args)` |
+
+C 使用 C11，C++ 使用 C++17。测试文件链接业务实现，名为 `main.c`、`main.cpp`、`main.cc` 或 `main.cxx` 的业务入口只参与编译，不链接到测试程序。把测试要调用的函数放在其他业务源文件中。断言失败或返回非零退出码会使测试失败。Java 使用 Java 17，执行测试类时启用断言，测试可以用 `assert` 或抛出 `AssertionError` 表达失败。C、C++ 和 Java 的执行记录按实际运行的测试程序或测试类计数。
+
+已有的根目录布局也可继续使用。C 和 C++ 会识别根目录业务文件，以及 `src/`、`tests/` 之外按 `test_*` 或 `*_test` 命名的旧测试。Java 会识别业务源码目录之外的 `*Test.java`，旧测试的包名须与相对于工作区根目录的路径对应。对于不符合约定的旧快照，可在工作区调整文件路径和测试入口，再保存新快照。
+
+### 查看编译结果和测试结果
+
+1. 确认“当前文件快照”的版本和摘要，在“隔离编译与测试”中点击“执行当前已保存快照”。编译和测试使用同一个快照。
+2. 展开“真实执行记录”中对应的条目，查看“编译结果”“测试结果”和各阶段的退出码。编译失败时测试未运行。编译通过但测试程序返回非零或断言失败时，页面显示测试失败。未发现测试时也不会判定为通过。
+3. 点击“查看真实执行日志”。C、C++ 和 Java 的日志用 `【编译】` 和 `【测试】` 标记阶段。Python 的日志分别显示标准输出和错误输出。日志超过保留上限时保留开头和末尾。
 
 ### 验证保存与执行接口
 
@@ -263,7 +323,7 @@ class LimitTests(unittest.TestCase):
 4. 对这个样例，具备可用环境并真正执行成功时，应运行2项测试、退出码0。没有发现测试、测试失败、超时、取消或执行期间快照变化，都不能作为当前快照通过的结果。
 5. 运行中可刷新执行状态，填写署名和依据后点击“取消本次执行”。
 
-本环境尚未进行真实Docker容器执行验收，不能把模拟执行器或单元测试当作容器已实际运行。实际交付检查见[验证记录](verification.md)。未配置执行器时，可以验证快照保存与“不可执行”的页面状态，但不能记录测试通过。
+未配置执行器时，可验证代码生成、审阅和快照保存。验证真实容器执行时，以当前快照对应的执行记录为准。
 
 ## 接口索引
 
@@ -274,15 +334,19 @@ class LimitTests(unittest.TestCase):
 | `GET /design/config` | 脱敏模型配置，仅读取，不测试远程连通 |
 | `GET /design/projects/{project_id}/flows` | 项目设计流程列表 |
 | `POST /design/projects/{project_id}/flows` | 只传需求版本、可选设计依据、名称、目标及署名，创建设计草稿 |
-| `GET /design/flows/{flow_id}` | 固定需求、问题、答复、候选设计、提案、调用和历史 |
-| `POST /design/flows/{flow_id}/actions/{action}` | `start`、`generate`、`validate`、`commit`、`complete`、`reject`、`cancel` |
+| `GET /design/flows/{flow_id}` | 固定需求、当前问题、已保存答复、候选设计、提案、每轮模型问题与答复及历史 |
+| `POST /design/flows/{flow_id}/actions/{action}` | `start`、`generate`、`generate_confirmed`、`validate`、`commit`、`complete`、`reject`、`cancel`。`generate_confirmed` 沿用当前流程的已确认范围发起生成，入队成功返回 202 |
 | `POST /design/flows/{flow_id}/answers` | 按当前问题逐项提交答复 |
-| `GET /engineering/executor` | 隔离执行配置与Docker可用状态 |
+| `GET /engineering/executor` | `profiles` 中各语言的隔离执行配置与 Docker 可用状态，顶层保留 Python 状态字段 |
 | `GET /engineering/projects/{project_id}/workspaces` | 项目工作区列表 |
-| `POST /engineering/projects/{project_id}/workspaces` | 创建空工作区，可关联同项目已确认设计 |
+| `POST /engineering/projects/{project_id}/workspaces` | 创建空工作区，可关联同项目已确认设计。`language` 可选 `python`、`c`、`cpp`、`java`，默认 `python` |
 | `GET /engineering/workspaces/{workspace_id}` | 最新文件快照及执行记录 |
+| `GET /engineering/workspaces/{workspace_id}/code-generations` | 查看工作区的代码生成任务 |
+| `POST /engineering/workspaces/{workspace_id}/code-generations` | 提交生成任务，返回 202 |
+| `GET /engineering/workspaces/{workspace_id}/code-generations/{generation_id}` | 查看任务状态和候选文件差异 |
+| `POST /engineering/workspaces/{workspace_id}/code-generations/{generation_id}/apply` | 确认候选并保存为新的工作区快照，返回 201 |
 | `POST /engineering/workspaces/{workspace_id}/snapshots` | 携带工作区版本保存完整文件集合 |
-| `POST /engineering/workspaces/{workspace_id}/executions` | 执行最新快照，固定 `profile=python_unittest` |
+| `POST /engineering/workspaces/{workspace_id}/executions` | 编译或测试工作区的最新快照。省略 `profile` 时根据工作区语言选择，显式指定时必须与该语言匹配。可用值为 `python_unittest`、`c_native`、`cpp_native`、`java_native` |
 | `POST /engineering/executions/{execution_id}/cancel` | 请求取消执行 |
 
 设计动作携带流程 `expected_version`、署名和依据，审阅及完成还携带当前 `proposal_version`；工作区保存和执行使用其自身版本。出现409时读取最新状态并重新审阅，不自动换版本重放写入。设计流程、提案、知识修订、工作区和文件快照的版本彼此独立。

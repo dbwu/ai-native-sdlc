@@ -13,7 +13,7 @@ from pydantic import ValidationError
 from knowledge.db import connect
 from knowledge.semantics import KnowledgeError
 from knowledge.workspace import (ExecutionCancel, ExecutionCreate, REPORT_PREFIX, SnapshotCreate,
-                                 WorkspaceCreate, WorkspaceService, docker_command, executor_status,
+                                 WorkspaceCreate, WorkspaceService, docker_command, executor_status, executor_statuses,
                                  normalized_files, run_isolated, snapshot_digest)
 
 
@@ -64,7 +64,7 @@ def test_docker_profile_has_fixed_entrypoint_and_isolation_limits():
     assert 'unittest' in command[-1]
 
 
-def fake_runner(monkeypatch, stdout, code=0, adapt_nonce=True):
+def fake_runner(monkeypatch, stdout, code=0, adapt_nonce=True, stderr=b''):
     calls = []
     def fake_run(command, **kwargs):
         calls.append(command)
@@ -72,9 +72,9 @@ def fake_runner(monkeypatch, stdout, code=0, adapt_nonce=True):
     class Process:
         def __init__(self, command, **kwargs):
             calls.append(command)
-            prefix = re.search(r"print\('([^']*)'\+json", command[-1]).group(1)
+            prefix = re.search(r"(?:print\(|REPORT_PREFIX = )'([^']*)'", command[-1]).group(1)
             output = stdout.replace(REPORT_PREFIX.encode(), prefix.encode()) if adapt_nonce else stdout
-            self.stdout, self.stderr = BytesIO(output), BytesIO(b'')
+            self.stdout, self.stderr = BytesIO(output), BytesIO(stderr)
             self.returncode = code
         def poll(self): return self.returncode
         def wait(self, timeout=None): return self.returncode
@@ -107,6 +107,54 @@ def test_execution_captures_bounded_logs_but_preserves_final_runner_report(monke
                           {'docker': 'docker', 'image': 'approved:1', 'timeout_seconds': 5})
     assert result['passed'] and result['output_truncated']
     assert len(result['stdout'].encode()) <= 16384
+
+
+def test_native_executor_profiles_use_distinct_images_and_a_single_docker_probe(monkeypatch):
+    monkeypatch.setenv('KNOWLEDGE_EXECUTOR', 'docker')
+    monkeypatch.delenv('KNOWLEDGE_EXECUTOR_IMAGE', raising=False)
+    monkeypatch.delenv('KNOWLEDGE_EXECUTOR_JAVA_IMAGE', raising=False)
+    monkeypatch.setenv('KNOWLEDGE_EXECUTOR_C_IMAGE', 'cc:local')
+    monkeypatch.setenv('KNOWLEDGE_EXECUTOR_CPP_IMAGE', 'cpp:local')
+    monkeypatch.setattr('knowledge.workspace.shutil.which', lambda _: 'docker')
+    calls = []
+
+    def probe(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr('knowledge.workspace.subprocess.run', probe)
+    result = executor_statuses()
+    assert not result['available'] and result['profile'] == 'python_unittest'
+    assert result['profiles']['c_native']['image'] == 'cc:local'
+    assert result['profiles']['cpp_native']['image'] == 'cpp:local'
+    assert result['profiles']['c_native']['available'] and not result['profiles']['java_native']['available']
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize('exit_code,compiled,tested,compile_code,test_code,count,expected', [
+    (2, 'failed', 'not_run', 1, None, 0, ('failed', 'not_run')),
+    (3, 'passed', 'failed', 0, 7, 1, ('passed', 'failed')),
+    (4, 'passed', 'no_tests', 0, None, 0, ('passed', 'not_run')),
+    (4, 'not_run', 'no_tests', None, None, 0, ('not_run', 'not_run')),
+    (0, 'passed', 'passed', 0, 0, 2, ('passed', 'passed')),
+    (0, 'passed', 'passed', 0, 0, 0, (None, None)),
+])
+def test_native_execution_accepts_only_matching_phase_report(
+        monkeypatch, exit_code, compiled, tested, compile_code, test_code, count, expected):
+    payload = report(count, profile='c_native', compile_status=compiled, test_status=tested,
+                     compile_returncode=compile_code, test_returncode=test_code, successful=exit_code == 0)
+    logs = '【编译】开始\n'.encode() + b'\x00' + b'x' * 20000 + '\n【测试】结束\n'.encode()
+    calls = fake_runner(monkeypatch, payload, code=exit_code, stderr=logs)
+    result = run_isolated([{'path': 'test_example.c', 'content': 'int main(void) { return 0; }'}],
+                          {'docker': 'docker', 'image': 'approved:1', 'timeout_seconds': 5, 'profile': 'c_native'})
+    assert (result['compile_status'], result['test_status']) == expected
+    assert result['passed'] == (exit_code == 0 and count > 0)
+    assert '【编译】开始' in result['stderr'] and '【测试】结束' in result['stderr'] and result['output_truncated']
+    assert '\x00' not in result['stderr'] and r'\x00' in result['stderr']
+    assert REPORT_PREFIX not in result['stdout']
+    command = next(command for command in calls if command[1] == 'run')
+    assert '--network=none' in command and '--read-only' in command and '--user=65534:65534' in command
+    assert '--tmpfs=/build:rw,exec,nosuid,nodev,size=64m,mode=1777' in command
 
 
 def test_preconstructed_report_and_early_successful_exit_cannot_fake_execution(monkeypatch):
@@ -168,8 +216,8 @@ def test_engineering_execution_disabled_and_snapshot_drift_cannot_pass(db_url, p
     with pytest.raises(KnowledgeError) as disabled:
         service.execute(workspace['id'], request)
     assert disabled.value.status_code == 503
-    monkeypatch.setattr('knowledge.workspace.executor_status', lambda: {'available': True})
-    monkeypatch.setattr('knowledge.workspace.executor_config', lambda: {'backend': 'docker', 'image': 'fixed:1', 'timeout_seconds': 30, 'profile': 'python_unittest'})
+    monkeypatch.setattr('knowledge.workspace.executor_status', lambda profile: {'available': True})
+    monkeypatch.setattr('knowledge.workspace.executor_config', lambda profile: {'backend': 'docker', 'image': 'fixed:1', 'timeout_seconds': 30, 'profile': profile})
     def execute_and_modify(files, config, cancelled):
         # 另一个连接可以保存新快照，证明执行期间没有持有项目事务锁。
         current = service.detail(workspace['id'])

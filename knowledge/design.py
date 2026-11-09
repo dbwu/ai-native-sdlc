@@ -1,4 +1,5 @@
 """固定需求版本、异步生成设计、显式审阅；不生成代码或测试通过证据。"""
+from collections import defaultdict
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -11,7 +12,7 @@ from psycopg.types.json import Jsonb
 from pydantic import ValidationError
 
 from .db import connect
-from .design_models import DesignAction, DesignDocument, DesignFlowCreate, AnswerSubmission
+from .design_models import AnswerSubmission, ConfirmedScopeDesign, DesignAction, DesignDocument, DesignFlowCreate
 from . import model_gateway
 from .models import EntityCreate, RelationCreate
 from .operations import KnowledgeOperations
@@ -19,8 +20,9 @@ from .operations_models import ProposalReview
 from .semantics import KnowledgeError
 from .service import KnowledgeService as KS
 
-MAX_GENERATIONS = 5
 EXTRA_KINDS = {'Domain', 'BusinessRule', 'Constraint', 'Decision', 'ArchitectureComponent', 'Interface', 'DataModel'}
+# 早期任务可能没有保存时限，沿用原来的十分钟恢复规则。
+GENERATION_EXPIRED = "COALESCE((result->>'deadline_at')::timestamptz, updated_at + interval '10 minutes') <= clock_timestamp()"
 
 
 def canonical(value):
@@ -29,6 +31,11 @@ def canonical(value):
 
 def sha256(value):
     return hashlib.sha256(canonical(value).encode('utf-8')).hexdigest()
+
+
+def generation_recovery_seconds(timeout):
+    attempts = model_gateway.MAX_MODEL_ATTEMPTS
+    return max(600, attempts * timeout + (attempts - 1) * model_gateway.RETRY_DELAY_SECONDS + 60)
 
 
 class DesignService:
@@ -127,13 +134,34 @@ class DesignService:
             state, definition = flow['state'], flow['definition']
             def records(refs):
                 return [KS._get(conn, 'entity', UUID(ref['id']), ref['version']) for ref in refs]
-            jobs = conn.execute('''SELECT id,flow_id,version,status,actor,reason,created_at,updated_at,finished_at,
-                diagnostic,trace,result FROM current_design_generations WHERE flow_id=%s ORDER BY created_at DESC,id LIMIT 20''', (flow_id,)).fetchall()
+            jobs = self._generation_history(conn, flow_id, state['answers'])
             history = conn.execute('SELECT * FROM design_flow_event WHERE flow_id=%s ORDER BY version DESC LIMIT 100', (flow_id,)).fetchall()
             return {'flow': flow, 'requirements': records(definition['requirements']), 'context': records(definition['input_knowledge']),
                     'design': state['design'], 'questions': state['questions'], 'answers': state['answers'],
                     'assumptions': state['assumptions'], 'proposal': self._proposal(conn, state),
                     'jobs': jobs, 'history': history, 'model_config': model_gateway.public_model_config()}
+
+    @staticmethod
+    def _generation_history(conn, flow_id, answers):
+        jobs = conn.execute('''SELECT id,flow_id,version,status,actor,reason,created_at,updated_at,finished_at,
+            diagnostic,trace,result,COALESCE(request->>'generation_mode','standard') AS generation_mode
+            FROM current_design_generations WHERE flow_id=%s ORDER BY created_at DESC,id LIMIT 20''', (flow_id,)).fetchall()
+        answers_by_job = defaultdict(list)
+        for answer in answers:
+            answers_by_job[answer['job_id']].append(answer)
+        legacy_ids = [str(job['id']) for job in jobs if job['status'] == 'SUCCEEDED' and 'questions' not in job['result']]
+        legacy_questions = {}
+        if legacy_ids:
+            # 旧任务的原始问题在当时的不可变流程版本中，包括当时尚未回答的问题。
+            rows = conn.execute("""SELECT document->>'active_job_id' AS job_id, document->'questions' AS questions
+                FROM design_flow_event WHERE flow_id=%s AND action='generated' AND status='NEEDS_CLARIFICATION'
+                AND document->>'active_job_id' = ANY(%s::text[])""", (flow_id, legacy_ids)).fetchall()
+            legacy_questions = {row['job_id']: row['questions'] for row in rows}
+        for job in jobs:
+            job_id = str(job['id'])
+            job['questions'] = job['result'].get('questions', legacy_questions.get(job_id, []))
+            job['answers'] = answers_by_job[job_id]
+        return jobs
 
     def action(self, flow_id, action, request: DesignAction):
         with connect(self.database_url) as conn:
@@ -158,23 +186,25 @@ class DesignService:
                 self._fresh(conn, flow)
                 state['completed_stages'] = [{'stage': 0, 'key': 'requirements', 'actor': request.actor}]
                 status = 'READY'
-            elif action == 'generate':
-                if status not in {'READY', 'BLOCKED'} and not (status == 'REVIEW_PENDING' and proposal and proposal['status'] == 'rejected'):
+            elif action in {'generate', 'generate_confirmed'}:
+                confirmed_scope = action == 'generate_confirmed'
+                allowed_statuses = {'READY', 'BLOCKED', 'NEEDS_CLARIFICATION'} if confirmed_scope else {'READY', 'BLOCKED'}
+                if status not in allowed_statuses and not (status == 'REVIEW_PENDING' and proposal and proposal['status'] == 'rejected'):
                     raise KnowledgeError('请先确认需求、完成澄清或明确拒绝旧设计后，再生成设计', 409)
                 if proposal and proposal['status'] != 'rejected':
                     raise KnowledgeError('已有设计提案尚未拒绝，不能覆盖或重复生成', 409)
                 self._fresh(conn, flow)
                 model_gateway.ensure_model_configured()
-                if state['generation_count'] >= MAX_GENERATIONS:
-                    raise KnowledgeError('本流程已达到5次人工发起的生成上限，请复核范围后新建流程', 409)
-                context = self._context(conn, flow)
+                context = self._context(conn, flow, confirmed_guidance=request.reason if confirmed_scope else None)
                 job_id = uuid4()
                 config = model_gateway.model_config_snapshot()
                 job_request = {'context': context, 'config': config['public'], 'config_fingerprint': config['fingerprint'],
-                               'input_sha256': sha256(context)}
+                               'input_sha256': sha256(context), 'generation_mode': 'confirmed_scope' if confirmed_scope else 'standard'}
                 conn.execute('''INSERT INTO design_generation(id,flow_id,project_id,actor,reason,request)
                     VALUES (%s,%s,%s,%s,%s,%s)''', (job_id, flow_id, flow['project_id'], request.actor, request.reason, Jsonb(job_request)))
                 self._job_event(conn, {'id': job_id}, 'QUEUED', {'diagnostic': '等待后台模型任务执行'})
+                if status == 'NEEDS_CLARIFICATION':
+                    state['question_job_id'] = state.get('question_job_id') or state['active_job_id']
                 state.update(active_job_id=str(job_id), generation_count=state['generation_count']+1, last_error=None,
                              design_proposal_id=None)
                 status = 'GENERATING'
@@ -225,31 +255,37 @@ class DesignService:
             supplied = {answer.key: answer.answer for answer in request.answers}
             if len(supplied) != len(request.answers) or set(supplied) != {question['key'] for question in state['questions']}:
                 raise KnowledgeError('请逐项回答当前全部澄清问题，不能重复或加入未知问题')
-            state['answers'].extend({**question, 'answer': supplied[question['key']], 'job_id': state['active_job_id']} for question in state['questions'])
-            state.update(questions=[], last_error=None)
+            question_job_id = state.get('question_job_id') or state['active_job_id']
+            state['answers'].extend({**question, 'answer': supplied[question['key']], 'job_id': question_job_id} for question in state['questions'])
+            state.update(questions=[], question_job_id=None, last_error=None)
             self._event(conn, flow, 'READY', 'answers', request.actor, request.reason, state)
         return self.snapshot(flow_id)
 
     @staticmethod
-    def _context(conn, flow):
+    def _context(conn, flow, *, confirmed_guidance=None):
         definition = flow['definition']
         def records(refs):
             return [jsonable_encoder(KS._get(conn, 'entity', UUID(ref['id']), ref['version'])) for ref in refs]
         context = {'title': flow['title'], 'goal': definition['goal'], 'requirements': records(definition['requirements']),
                    'knowledge': records(definition['input_knowledge']), 'clarifications': flow['state']['answers'],
                    'scope': '仅设计：形成可审阅的组件、接口、数据模型和测试计划；不生成代码，不声称执行或测试通过。'}
+        if confirmed_guidance is not None:
+            context.update(generation_guidance=confirmed_guidance, pending_questions=flow['state']['questions'])
         if len(canonical(context).encode('utf-8')) > 512*1024:
             raise KnowledgeError('需求与设计依据超过512KiB，请缩小本轮范围')
         return context
 
     @staticmethod
-    def _check_design(document, flow):
-        design = DesignDocument.model_validate(document)
+    def _check_design(document, flow, *, confirmed_context=None):
+        model = ConfirmedScopeDesign if confirmed_context is not None else DesignDocument
+        design = model.model_validate(document)
         requirements = {ref['id'] for ref in flow['definition']['requirements']}
         items = [*design.questions, *design.components, *design.interfaces, *design.data_models, *design.test_plan]
         for item in items:
             if not set(item.requirement_ids) <= requirements:
                 raise KnowledgeError('模型设计引用了未选入本流程的需求，未发布提案')
+        if confirmed_context is not None and design.questions:
+            DesignService._check_acceptance_questions(design.questions, confirmed_context)
         if not design.questions:
             for group in (design.components, design.test_plan):
                 covered = {ref for item in group for ref in item.requirement_ids}
@@ -258,6 +294,21 @@ class DesignService:
         if len(canonical(design.model_dump(mode='json')).encode('utf-8')) > 512*1024:
             raise KnowledgeError('模型设计输出超过512KiB，未发布提案')
         return design.model_dump(mode='json')
+
+    @staticmethod
+    def _check_acceptance_questions(questions, context):
+        criteria = {row['id']: set(row['attributes']['acceptance_criteria']) for row in context['requirements']}
+        answered = defaultdict(set)
+        for answer in context['clarifications']:
+            answered[''.join(answer['question'].casefold().split()).rstrip('？?')].update(answer['requirement_ids'])
+        for question in questions:
+            if not any(question.acceptance_criterion in criteria[ref] for ref in question.requirement_ids):
+                raise KnowledgeError('模型追问未引用所选需求的原始验收条件，请重新按已确认范围生成')
+            if len(set(question.options)) != len(question.options):
+                raise KnowledgeError('模型追问未给出不同的规则选项，请重新按已确认范围生成')
+            normalized = ''.join(question.question.casefold().split()).rstrip('？?')
+            if set(question.requirement_ids) & answered[normalized]:
+                raise KnowledgeError('模型重复询问已有答复的问题，请重新按已确认范围生成')
 
     def _proposal_plan(self, flow, job, design, trace):
         project_id, flow_id = flow['project_id'], flow['id']
@@ -306,6 +357,15 @@ class DesignService:
             raise KnowledgeError('本轮设计关系超过200项操作，请拆分需求范围')
         return {'operations': operations, 'baselines': flow['state']['baselines'], 'entity_mapping': mapping, 'removed_keys': []}
 
+    def _check_model_retry(self, flow_id, job_id):
+        with connect(self.database_url) as conn:
+            flow = self._lock(conn, flow_id, writable=False)
+            if (flow['status'] != 'GENERATING' or flow['state']['active_job_id'] != str(job_id)
+                    or self._job(conn, job_id)['status'] != 'RUNNING'):
+                raise KnowledgeError('设计生成任务已停止，未再次调用模型', 409)
+            KS._assert_project(conn, flow['project_id'])
+            self._fresh(conn, flow)
+
     def run_job(self, job_id):
         """先短事务领取，完全退出数据库事务后调用模型，再检查基线并原子保存结果。"""
         with connect(self.database_url) as conn:
@@ -322,17 +382,23 @@ class DesignService:
                 state = deepcopy(flow['state']); state['last_error'] = exc.message
                 self._event(conn, flow, 'BLOCKED', 'generation_stale', 'model-worker', exc.message, state)
                 return
+            timeout = job['request']['config']['timeout_seconds']
+            # 预留请求超时、重试等待和结果入库时间，避免其他 worker 提前回收。
             self._job_event(conn, job, 'RUNNING', {'diagnostic': '模型正在生成设计',
-                'deadline_at': (datetime.now(timezone.utc)+timedelta(minutes=10)).isoformat()})
+                'deadline_at': (datetime.now(timezone.utc)+timedelta(seconds=generation_recovery_seconds(timeout))).isoformat()})
         trace = None
+        confirmed_scope = job['request'].get('generation_mode') == 'confirmed_scope'
         try:
             config = model_gateway.public_model_config()
             if config != job['request']['config']:
                 raise KnowledgeError('模型服务配置在任务入队后发生变化，请核对配置后显式重新生成', 409)
-            result = model_gateway.complete_design(job['request']['context'], DesignDocument.model_json_schema(),
-                expected_fingerprint=job['request']['config_fingerprint'])
+            context = job['request']['context']
+            schema = ConfirmedScopeDesign if confirmed_scope else DesignDocument
+            result = model_gateway.complete_design(context, schema.model_json_schema(), confirmed_scope=confirmed_scope,
+                expected_fingerprint=job['request']['config_fingerprint'],
+                before_retry=lambda: self._check_model_retry(job['flow_id'], job_id))
             trace = {**result['trace'], 'context_sha256': job['request']['input_sha256']}
-            design = self._check_design(result['document'], flow)
+            design = self._check_design(result['document'], flow, confirmed_context=context if confirmed_scope else None)
             trace['design_sha256'] = sha256(design)
             with connect(self.database_url) as conn:
                 flow = self._lock(conn, job['flow_id'], writable=False)
@@ -344,7 +410,8 @@ class DesignService:
                 KS._assert_project(conn, flow['project_id'])
                 self._fresh(conn, flow)
                 state = deepcopy(flow['state'])
-                state.update(design=design, questions=design['questions'], assumptions=design['assumptions'], last_error=None)
+                state.update(design=design, questions=design['questions'], assumptions=design['assumptions'], last_error=None,
+                             question_job_id=str(job_id) if design['questions'] else None)
                 if design['questions']:
                     status = 'NEEDS_CLARIFICATION'
                 else:
@@ -353,13 +420,17 @@ class DesignService:
                         '模型设计：'+flow['title'], job['actor'], plan)
                     state['design_proposal_id'] = str(proposal['id'])
                     status = 'REVIEW_PENDING'
-                self._job_event(conn, job, 'SUCCEEDED', {'diagnostic': '等待澄清答复' if design['questions'] else '设计候选已生成，等待审阅', 'trace': trace})
+                diagnostic = '等待澄清答复' if design['questions'] else '设计候选已生成，等待审阅'
+                if trace.get('attempt_count', 1) > 1:
+                    diagnostic = '模型自动重试成功。' + diagnostic
+                self._job_event(conn, job, 'SUCCEEDED', {'diagnostic': diagnostic, 'trace': trace, 'questions': design['questions']})
                 self._event(conn, flow, status, 'generated', 'model-worker', '模型返回已校验；没有自动批准或提交知识', state)
         except Exception as exc:
             if isinstance(exc, KnowledgeError):
                 message = exc.message
             elif isinstance(exc, ValidationError):
-                message = '模型设计输出未通过结构校验，请重新生成；没有发布知识或执行代码'
+                message = ('模型返回未通过结构校验：请重新按已确认范围生成可审阅设计，或给出影响验收的具体未决规则。'
+                           if confirmed_scope else '模型设计输出未通过结构校验，请重新生成；没有发布知识或执行代码')
             else:
                 message = '模型设计任务处理失败，请检查服务配置或后台日志后显式重试'
                 logging.getLogger(__name__).warning('设计任务失败：%s', type(exc).__name__)
@@ -371,23 +442,26 @@ class DesignService:
                     self._job_event(conn, job, 'STALE' if stale else 'FAILED', {'diagnostic': message, **({'trace': trace} if trace else {})})
                     state = deepcopy(flow['state'])
                     state['last_error'] = message
-                    self._event(conn, flow, 'BLOCKED', 'generation_failed', 'model-worker', message, state)
+                    status = 'NEEDS_CLARIFICATION' if not stale and state['questions'] and state.get('question_job_id') else 'BLOCKED'
+                    self._event(conn, flow, status, 'generation_failed', 'model-worker', message, state)
 
     def recover_expired(self):
         """进程中断后的超时任务只标失败，不自动重发可能产生费用的模型调用。"""
         with connect(self.database_url) as conn:
-            rows = conn.execute("SELECT id,flow_id FROM current_design_generations WHERE status='RUNNING' AND updated_at < clock_timestamp()-interval '10 minutes' LIMIT 20").fetchall()
+            rows = conn.execute(f"SELECT id,flow_id FROM current_design_generations WHERE status='RUNNING' AND {GENERATION_EXPIRED} LIMIT 20").fetchall()
         for row in rows:
             with connect(self.database_url) as conn:
                 flow = self._lock(conn, row['flow_id'], writable=False)
-                job = self._job(conn, row['id'])
-                if job['status'] != 'RUNNING' or job['updated_at'] > datetime.now(timezone.utc)-timedelta(minutes=10):
+                job = conn.execute(f"SELECT * FROM current_design_generations WHERE id=%s AND status='RUNNING' AND {GENERATION_EXPIRED}",
+                                   (row['id'],)).fetchone()
+                if job is None:
                     continue
                 message = '后台任务中断或超过恢复时限，需要人工确认后重新生成；没有自动重发模型请求'
                 self._job_event(conn, job, 'FAILED', {'diagnostic': message})
                 if flow['status'] == 'GENERATING' and flow['state']['active_job_id'] == str(job['id']):
                     state = deepcopy(flow['state']); state['last_error'] = message
-                    self._event(conn, flow, 'BLOCKED', 'generation_expired', 'model-worker', message, state)
+                    status = 'NEEDS_CLARIFICATION' if state['questions'] and state.get('question_job_id') else 'BLOCKED'
+                    self._event(conn, flow, status, 'generation_expired', 'model-worker', message, state)
 
     def run_next(self):
         self.recover_expired()

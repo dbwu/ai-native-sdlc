@@ -62,7 +62,7 @@ def create_app(url: str | None = None) -> FastAPI:
         lifespan=design_lifespan(lambda: url or database_url()),
         title="工程知识模型 API", version="0.4.1",
         description="AI 原生 SDLC 第一至四阶段，元模型版本 1。提供知识模型、知识操作、Agent 协作与带显式门禁的 SDLC 流程，"
-                    "以及仅需求启动的模型设计、不可变工程快照和隔离执行接口。模型与隔离执行默认未配置。"
+                    "以及模型设计、已确认设计的代码生成与审阅、不可变工程快照和隔离执行。模型与隔离执行默认未配置。"
                     "供本地或可信环境使用；调用方提交的操作者信息仅用于归属记录，不代表已完成身份认证。"
                     "字段名、枚举值和路由保持稳定，中文名称可通过 /metamodel 查询。",
         openapi_tags=[
