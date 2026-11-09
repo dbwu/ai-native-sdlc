@@ -34,11 +34,18 @@ const canGenerateConfirmed = computed(() => canGenerate.value || clarifying.valu
 const canSubmitConfirmed = computed(() => canGenerateConfirmed.value && canAct.value && config.value.configured
   && (!clarifying.value || (confirmedScope.value && !hasUnsavedAnswers.value)))
 const designConfirmed = computed(() => flow.value?.status === 'COMPLETED')
-const requirementNames = computed(() => new Map((detail.value?.requirements || []).map((e: RecordData) => [String(e.id), e.name])))
+const fixedRequirements = computed<RecordData[]>(() => detail.value?.requirements || [])
+const requirementNames = computed(() => new Map(fixedRequirements.value.map(item => [String(item.id), item.name])))
 let generation = 0, detailGeneration = 0, timer: ReturnType<typeof setTimeout> | undefined
 let answerScope = ''
 
 function nameOf(ids: string[] = []) { return ids.map(id => requirementNames.value.get(id) || '关联需求').join('、') }
+function deliveryLocation(requirement: RecordData, designId: string) {
+  return {
+    path: `/projects/${pid.value}/knowledge`,
+    query: { requirement: String(requirement.id), version: String(requirement.version), design: designId },
+  }
+}
 function statusName(value: string) { return value === 'STALE' ? '输入版本已变化' : labels[value] || value || '—' }
 function recordedAnswer(job: RecordData, key: string) {
   return (job.answers || []).find((answer: RecordData) => answer.key === key)?.answer
@@ -216,8 +223,21 @@ onBeforeUnmount(() => { ++generation; ++detailGeneration; stopPoll() })
           <p class="section-label">流程事件版本 {{ flow.version }}。本轮设计确认后，可在工程工作区关联设计；目前不会自动生成或执行代码。</p>
           <div v-if="flow.status === 'GENERATING'" class="info-box" role="status">模型正在生成设计，页面会更新状态。可取消流程；不会自动校验或提交生成的提案。</div>
           <div v-if="flow.state?.last_error || flow.state?.diagnostic" class="info-box warning">{{ flow.state.last_error || flow.state.diagnostic }}</div>
-          <div v-if="designConfirmed" class="info-box"><strong>本轮需求与设计已确认。</strong> <RouterLink :to="{ path: `/projects/${pid}/engineering`, query: { design: flow.id } }">进入工程工作区生成代码 →</RouterLink></div>
-          <details class="editor-box"><summary>本轮固定的需求版本</summary><article v-for="item in detail?.requirements" :key="item.id" class="studio-requirement"><h4>{{ item.name }} · v{{ item.version }}</h4><p>{{ item.description }}</p><ul><li v-for="criterion in item.attributes?.acceptance_criteria" :key="criterion">{{ criterion }}</li></ul></article></details>
+          <div v-if="designConfirmed" class="info-box">
+            <strong>本轮需求与设计已确认。</strong>
+            <div class="studio-actions">
+              <RouterLink v-if="fixedRequirements.length === 1" class="button secondary"
+                :to="deliveryLocation(fixedRequirements[0], flow.id)">查看本次设计产物</RouterLink>
+              <RouterLink class="button secondary" :to="{ path: `/projects/${pid}/engineering`, query: { design: flow.id } }">进入工程工作区生成代码 →</RouterLink>
+            </div>
+            <details v-if="fixedRequirements.length > 1">
+              <summary>查看本次设计产物</summary>
+              <ul><li v-for="item in fixedRequirements" :key="item.id">
+                <RouterLink :to="deliveryLocation(item, flow.id)">{{ item.name }} · v{{ item.version }}</RouterLink>
+              </li></ul>
+            </details>
+          </div>
+          <details class="editor-box"><summary>本轮固定的需求版本</summary><article v-for="item in fixedRequirements" :key="item.id" class="studio-requirement"><h4>{{ item.name }} · v{{ item.version }}</h4><p>{{ item.description }}</p><ul><li v-for="criterion in item.attributes?.acceptance_criteria" :key="criterion">{{ criterion }}</li></ul></article></details>
         </section>
 
         <section v-if="questions.length && clarifying" class="panel project-panel">

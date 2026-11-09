@@ -1,9 +1,12 @@
 """中文页面的项目发现、聚合视图及显式单步操作。"""
 from typing import Literal
+from urllib.parse import quote
 from uuid import UUID
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Response
 
+from .requirement_deliveries import RequirementDeliveries
+from .semantics import KnowledgeError
 from .workbench import WorkbenchAction, WorkbenchService
 
 
@@ -16,6 +19,24 @@ def workbench_router(url_provider):
     @router.get("/projects", summary="查询可选择的项目", description="无需预先知道 UUID，按创建时间从新到旧分页返回项目。")
     def projects(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)):
         return service().projects(limit, offset)
+
+    @router.get('/projects/{project_id}/requirements/{requirement_id}/deliveries', summary='预览固定需求版本的交付文档')
+    def requirement_deliveries(project_id: UUID, requirement_id: UUID, version: int = Query(ge=1),
+                               design_id: UUID | None = None):
+        return RequirementDeliveries(url_provider()).read(project_id, requirement_id, version, design_id)
+
+    @router.get('/projects/{project_id}/requirements/{requirement_id}/deliveries/{kind}', summary='下载固定版本的 Markdown 文档')
+    def download_requirement_delivery(project_id: UUID, requirement_id: UUID, kind: Literal['requirements_analysis', 'design'],
+                                      version: int = Query(ge=1), design_id: UUID | None = None):
+        # 无设计的需求分析链接固定为独立文档，即使之后出现了新的已确认设计。
+        result = RequirementDeliveries(url_provider()).read(project_id, requirement_id, version, design_id, select_default=kind == 'design')
+        document = result['documents'][kind]
+        if document is None:
+            raise KnowledgeError('所选需求版本尚无已确认的设计文档', 404)
+        return Response(document['markdown'], media_type='text/markdown', headers={
+            'Content-Disposition': f'attachment; filename="{kind}.md"; filename*=UTF-8\'\'{quote(document["filename"])}',
+            'Cache-Control': 'no-store',
+        })
 
     @router.get("/workflows/{workflow_id}/snapshot", summary="读取验证页面所需的一致快照", description="聚合流程、当前任务、待审提案、产物和证据，以及当前可用动作和禁用原因。")
     def snapshot(workflow_id: UUID):
