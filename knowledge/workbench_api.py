@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, Query, Response
 from .project_baselines import CourseModelRequest, ProjectBaselines, ProjectModelRequest, baseline_markdown
 from .project_comparison import comparison_markdown, read_comparison
 from .project_model import Key
+from .project_model_generation import ProjectModelGeneration, ProjectModelGenerationRequest
 from .requirement_deliveries import RequirementDeliveries
 from .semantics import KnowledgeError
 from .workbench import WorkbenchAction, WorkbenchService
@@ -34,6 +35,10 @@ def workbench_router(url_provider):
     @router.post('/projects/{project_id}/project-model/course-example', status_code=201, summary='提出选课教学架构和业务流程基线')
     def propose_course_model(project_id: UUID, body: CourseModelRequest):
         return ProjectBaselines(url_provider()).propose(project_id, body)
+
+    @router.post('/projects/{project_id}/project-model/model-draft', status_code=201, summary='从已确认设计生成待审项目基线')
+    def propose_model_draft(project_id: UUID, body: ProjectModelGenerationRequest):
+        return ProjectModelGeneration(url_provider()).propose(project_id, body)
 
     @router.get('/projects/{project_id}/project-model/markdown', summary='下载指定项目基线的 Markdown 和 Mermaid 图表')
     def project_model_markdown(project_id: UUID, version: int = Query(ge=1)):
@@ -87,6 +92,11 @@ def workbench_router(url_provider):
     @router.get("/proposals/{proposal_id}/diff", summary="对照原始基线审阅提案差异", description="使用提案 expected_version 读取旧快照，禁止用最新实体混充提案原基线。")
     def diff(proposal_id: UUID):
         return service().proposal_diff(proposal_id)
+
+    @router.get('/proposals/{proposal_id}/project-model-exchange', summary='查看项目建模提案的模型输入与回复')
+    def project_model_exchange(proposal_id: UUID, response: Response):
+        response.headers['Cache-Control'] = 'no-store'
+        return service().project_model_exchange(proposal_id)
 
     @router.post("/workflows/{workflow_id}/actions/{action}", summary="执行工作台显式单步操作", description="参考运行只停在待审产物，绝不自动审批或推进；校验、提交和阶段放行仍是独立动作。操作携带流程、任务和提案版本。")
     def action(workflow_id: UUID, action: Literal["run_reference_stage", "validate_proposal", "commit_proposal", "reject_proposal", "start",

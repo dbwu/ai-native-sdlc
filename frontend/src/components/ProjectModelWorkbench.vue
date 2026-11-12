@@ -13,6 +13,7 @@ import ProjectArchitectureCollaboration, { type ArchitecturePort, type ProjectCo
 type Reference = { id: string; version: number; name?: string }
 type Process = { key: string; name: string; description: string; diagrams: DesignDiagram[]; requirement_refs?: Reference[]; rule_refs?: Reference[] }
 type Version = { version: number; title: string; confirmed_at: string; proposal_id: string }
+type ModelOrigin = { model: string; design_id: string; design_version: number }
 type Baseline = Version & {
   summary: string
   model: {
@@ -31,6 +32,7 @@ type Baseline = Version & {
   processes: Process[]
   changes: ProjectModelChange[]
   download_url: string
+  model_origin?: ModelOrigin
 }
 
 const example = {
@@ -87,7 +89,14 @@ const busy = ref(false)
 const submitError = ref('')
 const draft = ref('')
 const draftBase = ref(0)
+const modelDesigns = ref<{ id: string; title: string; status: string; definition: { project_model_version?: number } }[]>([])
+const modelDesign = ref('')
+const guidance = ref('')
+const readingDesigns = ref(false)
+const designsError = ref('')
 const latestVersion = computed(() => Math.max(0, ...versions.value.map(item => item.version)))
+const availableDesigns = computed(() => modelDesigns.value.filter(item => item.status === 'COMPLETED'
+  && (item.definition.project_model_version || 0) === latestVersion.value))
 const editingCurrent = computed(() => !loading.value && !loadError.value && !versionQuery.value)
 const currentProcess = computed(() => baseline.value?.processes.find(item => item.key === processKey.value) ?? baseline.value?.processes[0])
 const activity = computed(() => currentProcess.value?.diagrams.find(item => item.kind === 'activity'))
@@ -145,6 +154,20 @@ function loadDraft() {
   draft.value = JSON.stringify(baseline.value?.model ?? example, null, 2)
 }
 
+async function loadModelDesigns(event: Event) {
+  if (!(event.currentTarget as HTMLDetailsElement).open) return
+  readingDesigns.value = true
+  designsError.value = ''
+  try {
+    modelDesigns.value = await request<typeof modelDesigns.value>('/design/projects/' + encodeURIComponent(props.projectId) + '/flows')
+    if (!availableDesigns.value.some(item => item.id === modelDesign.value)) modelDesign.value = ''
+  } catch (failure) {
+    designsError.value = (failure as Error).message
+  } finally {
+    readingDesigns.value = false
+  }
+}
+
 async function sendProposal(endpoint: string, body: Record<string, unknown>) {
   submitError.value = ''
   busy.value = true
@@ -192,10 +215,16 @@ function submitDraft() {
       </div>
       <p v-if="loading" class="section-label" role="status">正在读取项目基线…</p>
       <p v-else-if="loadError" class="info-box error" role="alert">{{ loadError }}</p>
-      <p v-else-if="!baseline" class="info-box">项目还没有已确认的架构和业务流程。可以从选课案例建立基线，或提交自己的项目模型。</p>
+      <p v-else-if="!baseline" class="info-box">项目还没有已确认的架构和业务流程。可以根据已确认设计请模型分析，再审阅基线提案。</p>
       <template v-else>
         <h3 class="baseline-title">{{ baseline.title }}</h3>
         <p class="section-label">项目基线 v{{ baseline.version }} · {{ dateTime(baseline.confirmed_at) }} 确认</p>
+        <p v-if="baseline.model_origin" class="section-label">
+          模型分析 · {{ baseline.model_origin.model }} ·
+          <RouterLink :to="{ path: '/projects/' + projectId + '/design', query: { flow: baseline.model_origin.design_id } }">
+            来源设计 v{{ baseline.model_origin.design_version }}
+          </RouterLink>
+        </p>
         <p v-if="baseline.summary" class="baseline-summary">{{ baseline.summary }}</p>
         <div class="model-tabs" aria-label="项目基线视图">
           <button type="button" class="button" :class="tab === 'architecture' ? 'primary' : 'secondary'" :aria-pressed="tab === 'architecture'" @click="tab = 'architecture'">架构总览</button>
@@ -281,11 +310,31 @@ function submitDraft() {
         </section>
       </template>
 
-      <details class="model-editor">
+      <details class="model-editor" @toggle="loadModelDesigns">
         <summary>建立项目基线提案</summary>
         <p v-if="versionQuery" class="info-box">切回最新项目基线后可建立新提案。</p>
         <template v-if="editingCurrent">
           <label class="field model-input">操作署名<input v-model="actor" maxlength="100" required :disabled="busy"></label>
+          <form class="model-edit-section" @submit.prevent="sendProposal('/model-draft', {
+            expected_version: latestVersion, design_id: modelDesign, guidance: guidance.trim(),
+          })">
+            <h4>从已确认设计生成项目基线</h4>
+            <label class="field model-input">设计来源
+              <select v-model="modelDesign" required :disabled="busy || readingDesigns">
+                <option value="">{{ readingDesigns ? '正在读取…' : '请选择已确认设计' }}</option>
+                <option v-for="item in availableDesigns" :key="item.id" :value="item.id">{{ item.title }}</option>
+              </select>
+            </label>
+            <p v-if="designsError" class="info-box error" role="alert">{{ designsError }}</p>
+            <p v-else-if="!readingDesigns && !availableDesigns.length" class="section-label">
+              请先在「需求设计」完成一份以当前项目基线为依据的设计。
+            </p>
+            <label class="field model-input">本轮建模说明（选填）
+              <textarea v-model="guidance" rows="2" maxlength="4000" :disabled="busy" placeholder="例如：说明本轮哪些职责、接口和业务分支发生变化"></textarea>
+            </label>
+            <button type="submit" class="button primary" :disabled="busy || !modelDesign || !actor.trim()">模型生成基线提案</button>
+            <p v-if="busy" class="section-label" role="status">正在处理提案。模型分析完成后会进入审阅页。</p>
+          </form>
           <form class="model-edit-section" @submit.prevent="sendProposal('/course-example', { expected_version: latestVersion, release })">
             <h4>选课教学案例</h4>
             <p>先在本页下方的「选课教学案例：导入一轮知识」导入相同版本，并在项目提案中校验和确认提交。</p>

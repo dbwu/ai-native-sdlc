@@ -7,7 +7,7 @@ interface ModelExchange {
   response: { content: string | null; finish_reason?: string | null; refusal?: string | null } | null
 }
 
-const props = defineProps<{ flowId: string; jobId: string; available: boolean; pending: boolean }>()
+const props = defineProps<{ flowId?: string; jobId?: string; path?: string; available: boolean; pending: boolean }>()
 const expanded = ref(false)
 const exchange = ref<ModelExchange | null>(null)
 const error = ref('')
@@ -29,7 +29,7 @@ async function loadExchange() {
   loading.value = true
   error.value = ''
   try {
-    const path = `/design/flows/${encodeURIComponent(props.flowId)}/generations/${encodeURIComponent(props.jobId)}/model-exchange`
+    const path = props.path ?? `/design/flows/${encodeURIComponent(props.flowId ?? '')}/generations/${encodeURIComponent(props.jobId ?? '')}/model-exchange`
     const data = await request<ModelExchange>(path)
     if (version === readVersion) exchange.value = data
   } catch (failure) {

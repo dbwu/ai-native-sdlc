@@ -9,6 +9,8 @@ from .db import connect
 from .models import Kind, Text, Version
 from .operations import KnowledgeOperations
 from .operations_models import ProposalReview
+from .project_architecture_views import logical_structure_diagram, project_collaboration_diagram
+from .project_model import ProjectModel, process_diagrams
 from .runtime import AgentRuntime, TERMINAL
 from .runtime_models import AgentCreate, ClaimRequest, RuntimeInput, TaskControl, TaskReport
 from .service import KnowledgeService
@@ -155,9 +157,30 @@ class WorkbenchService:
                     latest = conn.execute('SELECT max(version) AS v FROM source_revision WHERE source_id=%s',
                                           (UUID(extraction['source_id']),)).fetchone()['v']
                     stale |= latest != extraction['source_version']
+            plan = proposal['plan']
+            project_model = plan.get('project_model', {})
+            origin = project_model.get('model_origin')
+            preview = []
+            if origin:
+                candidate = ProjectModel.model_validate(project_model['model'])
+                preview = [logical_structure_diagram(candidate)]
+                if collaboration := project_collaboration_diagram(candidate):
+                    preview.append(collaboration)
+                for process in candidate.processes:
+                    preview.extend(process_diagrams(candidate, process))
             return {"id": proposal["id"], "project_id": proposal['project_id'], "version": proposal["version"], "status": proposal["status"], "changes": changes, "stale": stale,
                     "extraction_review": proposal['plan'].get('extraction', {}).get('review'),
-                    "project_model_changes": proposal["plan"].get("project_model", {}).get("changes", [])}
+                    "project_model_changes": project_model.get("changes", []),
+                    "project_model_origin": origin, "project_model_preview": preview,
+                    "has_project_model_exchange": bool(plan.get('project_model_exchange'))}
+
+    def project_model_exchange(self, proposal_id: UUID):
+        with connect(self.database_url) as conn:
+            proposal = KnowledgeOperations._proposal(conn, proposal_id)
+        exchange = proposal['plan'].get('project_model_exchange')
+        if not exchange:
+            raise KnowledgeError('此提案没有已保存的项目建模问答', 404)
+        return exchange
 
     def _reference_agent(self, conn, workflow, request):
         stage = STAGES[workflow["state"]["stage"]]

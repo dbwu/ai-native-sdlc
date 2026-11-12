@@ -232,7 +232,7 @@ class ProjectBaselines:
                 model = request.model
             return self._propose(conn, project_id, request, model)
 
-    def _propose(self, conn, project_id, request, model):
+    def _propose(self, conn, project_id, request, model, *, model_origin=None, model_exchange=None):
         previous_rows = conn.execute('SELECT document FROM project_model_revision WHERE project_id=%s ORDER BY version DESC',
                                      (project_id,)).fetchall()
         known = {node['key']: UUID(node['entity_id']) for row in reversed(previous_rows)
@@ -291,6 +291,10 @@ class ProjectBaselines:
         plan = {'operations': operations, 'baselines': baselines, 'entity_mapping': [], 'removed_keys': [],
                 'project_model': {'version': version, 'before_version': request.expected_version or None,
                                   'model': snapshot, 'changes': changes, 'source_refs': source_refs}}
+        if model_origin:
+            plan['project_model']['model_origin'] = model_origin
+        if model_exchange:
+            plan['project_model_exchange'] = model_exchange
         return KnowledgeOperations(self.database_url, connection=conn)._create(
             conn, project_id, f'项目架构与业务流程 v{version} · {model.title}', request.actor, plan)
 
@@ -330,6 +334,8 @@ class ProjectBaselines:
                 diagram['baseline_ref'] = reference
         if 'before_version' in document:
             baseline['comparison'] = {'before_version': document['before_version'], 'after_version': version}
+        if document.get('model_origin'):
+            baseline['model_origin'] = document['model_origin']
         return {'versions': versions, 'baseline': baseline}
 
 
@@ -345,6 +351,9 @@ def baseline_markdown(baseline):
     if baseline.get('comparison'):
         previous = baseline['comparison']['before_version']
         lines.insert(5, f'- 比较范围 {"首次创建" if previous is None else f"v{previous}"} → v{baseline["version"]}')
+    if origin := baseline.get('model_origin'):
+        lines[5:5] = [f'- 模型分析 {_text(origin["model"])} · 设计流程 `{origin["design_id"]}` · v{origin["design_version"]}',
+                      f'- 模型输出摘要 `{origin["output_sha256"]}`']
 
     def diagram_block(diagram):
         return ['', '```mermaid', diagram['mermaid'], '```', '']

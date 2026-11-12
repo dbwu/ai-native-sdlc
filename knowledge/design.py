@@ -15,7 +15,7 @@ from .db import connect
 from .design_diagrams import COLLABORATION_NODES, design_diagrams
 from .design_models import AnswerSubmission, ConfirmedScopeDesign, DesignAction, DesignDocument, DesignFlowCreate
 from . import model_gateway
-from .models import EntityCreate, RelationCreate
+from .models import EntityCreate, EntityUpdate, RelationCreate, RelationUpdate
 from .operations import KnowledgeOperations
 from .operations_models import ProposalReview
 from .semantics import KnowledgeError
@@ -80,15 +80,22 @@ class DesignService:
         return flow
 
     @staticmethod
-    def _fresh(conn, flow):
+    def _fresh(conn, flow, revised=None):
+        revised = revised or {}
         for baseline in flow['state']['baselines']:
             record = KS._get(conn, 'entity', UUID(baseline['id']))
-            if record['version'] != baseline['version'] or record['status'] == 'archived':
+            if record['version'] != revised.get(baseline['id'], baseline['version']) or record['status'] == 'archived':
                 raise KnowledgeError('需求或设计依据已有新版本，请基于最新知识新建设计流程', 409)
 
     @staticmethod
     def _proposal(conn, state):
         return KnowledgeOperations._proposal(conn, UUID(state['design_proposal_id'])) if state.get('design_proposal_id') else None
+
+    @staticmethod
+    def _needs_baseline_rebind(flow, proposal):
+        return bool(flow['definition'].get('project_model_version') and flow['status'] == 'REVIEW_PENDING'
+                    and proposal and proposal['status'] in {'pending', 'validated'}
+                    and 'design_baseline_version' not in proposal['plan'])
 
     def create(self, project_id, request: DesignFlowCreate):
         with connect(self.database_url) as conn:
@@ -142,12 +149,14 @@ class DesignService:
             requirements = records(definition['requirements'])
             jobs = self._generation_history(conn, flow_id, state['answers'])
             history = conn.execute('SELECT * FROM design_flow_event WHERE flow_id=%s ORDER BY version DESC LIMIT 100', (flow_id,)).fetchall()
+            proposal = self._proposal(conn, state)
             return {'flow': flow, 'requirements': requirements, 'context': records(definition['input_knowledge']),
                     'design': state['design'], 'questions': state['questions'], 'answers': state['answers'],
                     'diagrams': design_diagrams(state['design'], requirements=requirements, design_ref={
                         'flow_id': str(flow['id']), 'flow_version': flow['version'],
                         'proposal_id': state.get('design_proposal_id')}),
-                    'assumptions': state['assumptions'], 'proposal': self._proposal(conn, state),
+                    'assumptions': state['assumptions'], 'proposal': proposal,
+                    'needs_baseline_rebind': self._needs_baseline_rebind(flow, proposal),
                     'jobs': jobs, 'history': history, 'model_config': model_gateway.public_model_config()}
 
     @staticmethod
@@ -229,6 +238,20 @@ class DesignService:
                 state.update(active_job_id=str(job_id), generation_count=state['generation_count']+1, last_error=None,
                              design_proposal_id=None)
                 status = 'GENERATING'
+            elif action == 'rebind_baseline':
+                if not self._needs_baseline_rebind(flow, proposal) or request.proposal_version != proposal['version']:
+                    raise KnowledgeError('当前提案无需重新关联或版本已变化，请刷新后复核', 409)
+                self._fresh(conn, flow)
+                job = self._job(conn, UUID(state['active_job_id']))
+                if job['status'] != 'SUCCEEDED' or not job['trace'] or not state['design']:
+                    raise KnowledgeError('当前提案缺少可复用的设计生成记录', 409)
+                plan = self._proposal_plan(conn, flow, job, state['design'], job['trace'])
+                plan['replaces_proposal_id'] = str(proposal['id'])
+                operations = KnowledgeOperations(self.database_url, connection=conn)
+                replacement = operations._create(conn, flow['project_id'], proposal['title'], request.actor, plan)
+                operations.review(proposal['id'], ProposalReview(expected_version=proposal['version'], actor=request.actor,
+                    reason=f'重新关联项目基线，原待审提案由 {replacement["id"]} 替代。'), 'reject')
+                state.update(design_proposal_id=str(replacement['id']), last_error=None)
             elif action in {'validate', 'commit', 'reject'}:
                 if status not in {'REVIEW_PENDING', 'DESIGN_COMMITTED'} or not proposal:
                     raise KnowledgeError('当前没有可以审阅的设计提案', 409)
@@ -250,14 +273,21 @@ class DesignService:
                     raise KnowledgeError('设计提案必须先校验并明确提交，才能完成本里程碑', 409)
                 if request.proposal_version != proposal['version']:
                     raise KnowledgeError('设计提案版本已变化，请刷新后确认完成', 409)
-                self._fresh(conn, flow)
+                applied = proposal['result']['operations']
+                self._fresh(conn, flow, {op['id']: op['version'] for op in applied if op['op'] == 'update_entity'})
                 versions = []
-                for operation in proposal['result']['operations']:
+                for operation in applied:
                     table = 'entity' if operation['op'].endswith('entity') else 'relationship'
                     record = KS._get(conn, table, UUID(operation['id']))
                     if record['version'] != operation['version']:
                         raise KnowledgeError('设计产物在提交后已有新版本，请重新复核', 409)
                     versions.append({'table': table, 'id': operation['id'], 'version': record['version']})
+                for item in proposal['plan']['entity_mapping']:
+                    if item['resolution'] == 'unchanged':
+                        record = KS._get(conn, 'entity', UUID(item['entity_id']))
+                        if record['version'] != item['version']:
+                            raise KnowledgeError('沿用的设计产物在提交后已有新版本，请重新复核', 409)
+                        versions.append({'table': 'entity', 'id': item['entity_id'], 'version': item['version']})
                 state['artifact_versions'] = versions
                 state['completed_stages'].append({'stage': 1, 'key': 'design', 'proposal_id': str(proposal['id']), 'actor': request.actor})
                 status = 'COMPLETED'
@@ -339,7 +369,22 @@ class DesignService:
             if set(question.requirement_ids) & answered[normalized]:
                 raise KnowledgeError('模型重复询问已有答复的问题，请重新按已确认范围生成')
 
-    def _proposal_plan(self, flow, job, design, trace):
+    @staticmethod
+    def _baseline_bindings(conn, project_id, baseline):
+        model = baseline.get('model', {})
+        refs = {('ArchitectureComponent', node['key']): (node['entity_id'], node['entity_version'])
+                for node in model.get('nodes', []) if node['kind'] == 'module'}
+        refs.update({('Interface' if port['kind'] == 'interface' else 'DataModel', port['key']):
+                     (port['knowledge']['id'], port['knowledge']['version']) for port in model.get('architecture_ports', [])})
+        bindings = {}
+        for key, (record_id, version) in refs.items():
+            record = KS._get(conn, 'entity', UUID(record_id), version)
+            if record['project_id'] != project_id or record['kind'] != key[0] or record['status'] == 'archived':
+                raise KnowledgeError('项目基线引用了无效的设计知识版本', 409)
+            bindings[key] = record
+        return bindings
+
+    def _proposal_plan(self, conn, flow, job, design, trace):
         project_id, flow_id = flow['project_id'], flow['id']
         provenance = {'actor': 'model:'+trace.get('provider', 'configured')+'/'+trace.get('model', 'configured'),
                       'source_uri': 'urn:design:generation:'+str(job['id']), 'source_revision': trace['output_sha256'],
@@ -349,57 +394,113 @@ class DesignService:
             description='设计生成来源与输入输出摘要，不是代码执行或测试证据。', provenance=provenance,
             attributes={'category': 'analysis', 'uri': provenance['source_uri'], 'revision': trace['output_sha256'], 'extensions': trace})
         operations = [{'op': 'create_entity', 'id': str(evidence_id), 'data': evidence.model_dump(mode='json')}]
-        mapping, refs, components = [], [], {}
+        baseline = job['request']['context'].get('project_baseline', {})
+        if baseline.get('version') != flow['definition'].get('project_model_version'):
+            raise KnowledgeError('生成记录缺少本轮固定的项目基线，无法重新关联', 409)
+        bindings = self._baseline_bindings(conn, project_id, baseline)
+        groups = [('components', 'ArchitectureComponent'), ('interfaces', 'Interface'),
+                  ('data_models', 'DataModel'), ('test_plan', 'TestCase')]
+        items = {(kind, item['key']): item for group, kind in groups for item in design[group]}
+        records = {key: bindings[key] for key in items if key in bindings}
+        ids = {key: records[key]['id'] if key in records else uuid5(flow_id, ':'.join(key)) for key in items}
+        if len(set(ids.values())) != len(ids):
+            raise KnowledgeError('设计稳定键重复引用同一条基线知识，请复核项目基线', 409)
+        versions = {key: records[key]['version'] if key in records else 1 for key in items}
+        baselines = {(ref['table'], ref['id']): ref for ref in flow['state']['baselines']}
+
+        def pin(table, record):
+            record_id = str(record['id'])
+            ref = {'table': table, 'id': record_id, 'version': record['version']}
+            if baselines.setdefault((table, record_id), ref) != ref:
+                raise KnowledgeError('固定的设计依据和项目基线引用了不同知识版本', 409)
+
         requirements = {ref['id']: ref['version'] for ref in flow['definition']['requirements']}
-        nodes = {(endpoint_kind, item['key']): (kind, item['name'])
-                 for endpoint_kind, (group, kind) in COLLABORATION_NODES.items() for item in design[group]}
         outgoing = defaultdict(list)
         for link in design.get('collaboration_links', []):
             source, target = link['source'], link['target']
-            source_kind, _ = nodes[(source['kind'], source['key'])]
-            target_kind, target_name = nodes[(target['kind'], target['key'])]
-            outgoing[(source_kind, source['key'])].append({
-                'type': link['type'], 'target_id': str(uuid5(flow_id, target_kind+':'+target['key'])),
-                'target_kind': target_kind, 'target_name': target_name, 'target_version': 1, 'rationale': link['rationale'],
+            source_key = (COLLABORATION_NODES[source['kind']][1], source['key'])
+            target_key = (COLLABORATION_NODES[target['kind']][1], target['key'])
+            outgoing[source_key].append({
+                'type': link['type'], 'target_id': str(ids[target_key]), 'target_kind': target_key[0],
+                'target_name': items[target_key]['name'], 'target_version': versions[target_key], 'rationale': link['rationale'],
                 'requirements': [{'id': ref, 'version': requirements[ref]} for ref in link['requirement_ids']],
             })
-        for group, kind in [('components', 'ArchitectureComponent'), ('interfaces', 'Interface'), ('data_models', 'DataModel'), ('test_plan', 'TestCase')]:
-            for item in design[group]:
-                record_id = uuid5(flow_id, kind+':'+item['key'])
-                extensions = {'design_key': item['key'], 'requirement_ids': item['requirement_ids'],
-                              'generation_id': str(job['id']), 'implementation_status': 'planned'}
-                links = outgoing.get((kind, item['key']))
-                if links:
-                    extensions['collaboration_links'] = links
-                if group == 'components':
-                    attrs = {'responsibility': item['responsibility'], 'extensions': extensions}
-                    components[item['key']] = record_id
-                elif group == 'interfaces':
-                    attrs = {'protocol': item['protocol'], 'extensions': {**extensions, 'contract': item['contract']}}
-                elif group == 'data_models':
-                    attrs = {'schema_definition': item['schema_definition'], 'extensions': extensions}
-                else:
-                    attrs = {'steps': item['steps'], 'expected_result': item['expected_result'], 'extensions': extensions}
-                body = EntityCreate(project_id=project_id, kind=kind, name=item['name'], description=item['description'],
-                    attributes=attrs, provenance=provenance, evidence=[{'id': evidence_id, 'version': 1}])
-                operations.append({'op': 'create_entity', 'id': str(record_id), 'data': body.model_dump(mode='json')})
-                mapping.append({'key': kind+':'+item['key'], 'entity_id': str(record_id), 'version': 1, 'resolution': 'new'})
-                refs.append((record_id, item, kind))
+        attrs_by_kind = {'ArchitectureComponent': ('responsibility',), 'Interface': ('protocol',),
+                         'DataModel': ('schema_definition',), 'TestCase': ('steps', 'expected_result')}
+        bodies, mapping = {}, []
+        for key, item in items.items():
+            kind, design_key = key
+            original = records.get(key)
+            attrs = deepcopy(original['attributes']) if original else {}
+            attrs.update({field: item[field] for field in attrs_by_kind[kind]})
+            extensions = attrs.setdefault('extensions', {})
+            extensions['requirement_ids'] = list(dict.fromkeys([*extensions.get('requirement_ids', []), *item['requirement_ids']]))
+            if kind == 'Interface':
+                extensions['contract'] = item['contract']
+            if outgoing[key]:
+                previous = {(link['type'], link['target_id']): link for link in extensions.get('collaboration_links', [])}
+                for link in outgoing[key]:
+                    link_key = (link['type'], link['target_id'])
+                    # 端点仅换版本不构成源知识的业务变更。实际修订时再绑定本轮端点版本。
+                    previous[link_key] = link | {'target_version': previous.get(link_key, link)['target_version']}
+                extensions['collaboration_links'] = list(previous.values())
+            content = {'name': item['name'], 'description': item['description'], 'attributes': attrs}
+            resolution = 'new'
+            if original:
+                pin('entity', original)
+                resolution = 'unchanged' if all(content[field] == original[field] for field in content) else 'updated'
+            if resolution != 'unchanged':
+                extensions.update(design_key=design_key, generation_id=str(job['id']))
+                extensions.setdefault('implementation_status', 'planned')
+                bodies[key] = content | {'provenance': provenance, 'evidence': [*(original['evidence'] if original else []),
+                                                                               {'id': evidence_id, 'version': 1}]}
+                if original:
+                    versions[key] += 1
+            mapping.append({'key': ':'.join(key), 'entity_id': str(ids[key]), 'version': versions[key], 'resolution': resolution})
+
+        target_versions = {str(ids[key]): version for key, version in versions.items()}
+        for key, content in bodies.items():
+            original = records.get(key)
+            current_targets = {(link['type'], link['target_id']) for link in outgoing[key]}
+            for link in content['attributes']['extensions'].get('collaboration_links', []):
+                if (link['type'], link['target_id']) in current_targets:
+                    link['target_version'] = target_versions[link['target_id']]
+            if original:
+                body = EntityUpdate(**content, status=original['status'], expected_version=original['version'])
+            else:
+                body = EntityCreate(**content, project_id=project_id, kind=key[0])
+            operations.append({'op': 'update_entity' if original else 'create_entity', 'id': str(ids[key]),
+                               'data': body.model_dump(mode='json')})
+
         def edge(kind, source, target, source_version, target_version, rationale):
-            body = RelationCreate(type=kind, source_id=source, target_id=target, source_version=source_version,
-                                  target_version=target_version, rationale=rationale, provenance=provenance)
-            key = kind+':'+str(source)+':'+str(target)
-            operations.append({'op': 'create_relationship', 'id': str(uuid5(flow_id, key)), 'data': body.model_dump(mode='json')})
-        for record_id, item, kind in refs:
+            existing = conn.execute('''SELECT id,version,status,source_version,target_version FROM current_relationships
+                WHERE source_id=%s AND type=%s AND target_id=%s''', (source, kind, target)).fetchone()
+            content = {'source_version': source_version, 'target_version': target_version, 'rationale': rationale, 'provenance': provenance}
+            if existing:
+                pin('relationship', existing)
+                if (existing['source_version'], existing['target_version']) == (source_version, target_version) and existing['status'] in {'proposed', 'verified'}:
+                    return
+                body = RelationUpdate(**content, expected_version=existing['version'])
+                op, relation_id = 'update_relationship', existing['id']
+            else:
+                body = RelationCreate(**content, type=kind, source_id=source, target_id=target)
+                op, relation_id = 'create_relationship', uuid5(flow_id, f'{kind}:{source}:{target}')
+            operations.append({'op': op, 'id': str(relation_id), 'data': body.model_dump(mode='json')})
+
+        for key, item in items.items():
+            kind, _ = key
+            record_id, version = ids[key], versions[key]
             for req in item['requirement_ids']:
-                edge('DERIVED_FROM', record_id, UUID(req), 1, requirements[req], '根据本轮固定版本需求形成设计候选，待审阅。')
+                edge('DERIVED_FROM', record_id, UUID(req), version, requirements[req], '根据本轮固定版本需求形成设计候选，待审阅。')
                 if kind == 'TestCase':
-                    edge('VERIFIED_BY', UUID(req), record_id, requirements[req], 1, '计划使用本测试验收需求，尚未实现或执行。')
+                    edge('VERIFIED_BY', UUID(req), record_id, requirements[req], version, '计划使用本测试验收需求，尚未实现或执行。')
             if kind in {'Interface', 'DataModel'}:
-                edge('CONTAINS', components[item['component_key']], record_id, 1, 1, '组件包含本次设计的接口或数据结构。')
+                owner = ('ArchitectureComponent', item['component_key'])
+                edge('CONTAINS', ids[owner], record_id, versions[owner], version, '组件包含本次设计的接口或数据结构。')
         if len(operations) > 200:
             raise KnowledgeError('本轮设计关系超过200项操作，请拆分需求范围')
-        return {'operations': operations, 'baselines': flow['state']['baselines'], 'entity_mapping': mapping, 'removed_keys': []}
+        return {'operations': operations, 'baselines': list(baselines.values()), 'entity_mapping': mapping, 'removed_keys': [],
+                'design_baseline_version': baseline.get('version')}
 
     def _check_model_retry(self, flow_id, job_id):
         with connect(self.database_url) as conn:
@@ -470,7 +571,7 @@ class DesignService:
                 if design['questions']:
                     status = 'NEEDS_CLARIFICATION'
                 else:
-                    plan = self._proposal_plan(flow, job, design, trace)
+                    plan = self._proposal_plan(conn, flow, job, design, trace)
                     proposal = KnowledgeOperations(self.database_url, connection=conn)._create(conn, flow['project_id'],
                         '模型设计：'+flow['title'], job['actor'], plan)
                     state['design_proposal_id'] = str(proposal['id'])

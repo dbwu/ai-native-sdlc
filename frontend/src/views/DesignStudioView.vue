@@ -167,7 +167,7 @@ async function action(id: string) {
     await loadDetail(flowId.value)
     const failedValidation = id === 'validate' && proposal.value?.result?.valid === false
     const generating = id === 'generate' || id === 'generate_confirmed'
-    notify(failedValidation ? '设计提案未通过校验，请查看错误。' : generating ? '生成任务已提交，请在此查看进度。' : '操作已记录。', failedValidation ? 'warning' : 'success')
+    notify(failedValidation ? '设计提案未通过校验，请查看错误。' : generating ? '生成任务已提交，请在此查看进度。' : id === 'rebind_baseline' ? '已沿用原模型回复，生成重新关联基线的待审提案。' : '操作已记录。', failedValidation ? 'warning' : 'success')
   } catch (failure) {
     if (failure instanceof ApiError && failure.status === 409) {
       await loadDetail(flowId.value); confirmed.value = false
@@ -294,6 +294,10 @@ onBeforeUnmount(() => { ++generation; ++detailGeneration; stopPoll() })
 
         <section v-if="proposal" class="panel project-panel">
           <div class="studio-heading"><h3>设计知识提案与差异</h3><StatusPill :status="proposal.status"/></div><p>{{ proposal.title }} · 提案事件版本 {{ proposal.version }}</p><RouterLink class="text-button" :to="`/projects/${pid}/proposals/${proposal.id}`">在项目提案页查看 →</RouterLink>
+          <p v-if="detail?.needs_baseline_rebind" class="info-box warning">这份旧提案需要重新关联固定的项目基线。可用原模型回复重建待审提案，原差异保留在提案历史中。</p>
+          <p v-else-if="proposal.plan?.design_baseline_version">对照项目基线 v{{ proposal.plan.design_baseline_version }}。
+            <RouterLink v-if="proposal.plan.replaces_proposal_id" :to="`/projects/${pid}/proposals/${proposal.plan.replaces_proposal_id}`">查看重新关联前的提案</RouterLink>
+          </p>
           <div v-if="diff?.stale" class="info-box warning">输入知识或原基线已变化，请重新协调后生成设计，不能沿用旧提案提交。</div>
           <div v-if="proposal.result?.valid === false" class="info-box warning" role="alert">校验未通过：{{ JSON.stringify(proposal.result.errors) }}</div>
           <details class="editor-box"><summary>展开修改前与候选内容</summary><ProposalDiff :diff="diff"/><p v-if="!diff">正在读取差异…</p></details>
@@ -307,8 +311,9 @@ onBeforeUnmount(() => { ++generation; ++detailGeneration; stopPoll() })
               <button v-if="flow.status === 'DRAFT'" class="button primary" :disabled="!canAct" @click="action('start')">确认需求并启动</button>
               <button v-if="canGenerate" class="button primary" :disabled="!canAct || !config.configured" @click="action('generate')">{{ busy ? '正在处理…' : '生成设计提案' }}</button>
               <button v-if="canGenerate" class="button secondary" :disabled="!canSubmitConfirmed" @click="action('generate_confirmed')">按已确认范围生成设计</button>
-              <button v-if="proposal?.status === 'pending'" class="button secondary" :disabled="!canAct" @click="action('validate')">校验设计提案</button>
-              <button v-if="proposal?.status === 'validated'" class="button primary" :disabled="!canAct || !confirmed || diff?.stale" @click="action('commit')">确认提交设计提案</button>
+              <button v-if="detail?.needs_baseline_rebind" class="button secondary" :disabled="!canAct" @click="action('rebind_baseline')">重新关联基线知识</button>
+              <button v-else-if="proposal?.status === 'pending'" class="button secondary" :disabled="!canAct" @click="action('validate')">校验设计提案</button>
+              <button v-else-if="proposal?.status === 'validated'" class="button primary" :disabled="!canAct || !confirmed || diff?.stale" @click="action('commit')">确认提交设计提案</button>
               <button v-if="proposal?.status === 'committed'" class="button primary" :disabled="!canAct || !confirmed" @click="action('complete')">确认本轮设计完成</button>
               <button v-if="proposal && ['pending', 'validated'].includes(proposal.status)" class="button danger" :disabled="!canAct || !confirmed" @click="action('reject')">拒绝设计提案</button>
               <button class="button secondary" :disabled="!canAct || !confirmed" @click="action('cancel')">取消设计流程</button>

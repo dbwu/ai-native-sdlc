@@ -6,6 +6,7 @@ import { notify, selectProject, state } from '../store/workbench'
 import { dateTime } from '../lib/display'
 import type { RecordData } from '../types'
 import WorkspaceCodeGeneration from '../components/WorkspaceCodeGeneration.vue'
+import WorkspaceInterfaceComparison from '../components/WorkspaceInterfaceComparison.vue'
 
 const route = useRoute(), pid = computed(() => String(route.params.projectId || ''))
 const workspaces = ref<RecordData[]>([]), designs = ref<RecordData[]>([]), executor = ref<RecordData>({ configured: false, available: false })
@@ -83,6 +84,7 @@ async function choose(id: string) {
 async function loadProject() {
   const token = ++generation, project = pid.value
   const requestedDesign = typeof route.query.design === 'string' ? route.query.design : ''
+  const requestedWorkspace = typeof route.query.workspace === 'string' ? route.query.workspace : ''
   const previousSelection = selected.value
   loading.value = true; stopPoll(); ++detailGeneration; error.value = ''
   try {
@@ -98,7 +100,12 @@ async function loadProject() {
     if (token !== generation || project !== pid.value) return
     workspaces.value = items; designs.value = flows.filter(f => f.status === 'COMPLETED'); executor.value = configuration
     if (!snapshotSources.value.some(item => item.latest_snapshot_id === form.sourceSnapshot)) form.sourceSnapshot = ''
-    if (requestedDesign && designs.value.some(d => d.id === requestedDesign)) {
+    const linkedWorkspace = items.find(item => item.id === requestedWorkspace)
+    if (linkedWorkspace) {
+      selected.value = linkedWorkspace.id
+      form.design = linkedWorkspace.design_flow_id || ''
+      showCreate.value = false
+    } else if (requestedDesign && designs.value.some(d => d.id === requestedDesign)) {
       form.design = requestedDesign
       selected.value = items.find(w => w.id === previousSelection && w.design_flow_id === requestedDesign)?.id
         || items.find(w => w.design_flow_id === requestedDesign)?.id || ''
@@ -113,7 +120,7 @@ async function loadProject() {
   finally { if (token === generation) loading.value = false }
 }
 
-watch(() => [route.params.projectId, route.query.design, state.initialized, state.loading], () => {
+watch(() => [route.params.projectId, route.query.design, route.query.workspace, state.initialized, state.loading], () => {
   if (!state.initialized || state.loading || !pid.value) return
   detail.value = null; files.value = []; void loadProject()
 }, { immediate: true })
@@ -233,6 +240,8 @@ onBeforeUnmount(() => { ++generation; ++detailGeneration; stopPoll() })
           <label class="field">操作署名<input v-model="actor" required maxlength="100" :disabled="controlsLocked"></label>
           <label class="field">操作依据<textarea v-model="reason" required maxlength="2000" rows="3" :disabled="controlsLocked" placeholder="说明本次生成、审阅、保存或测试的目的"></textarea></label>
         </section>
+        <WorkspaceInterfaceComparison v-if="workspace.design_flow_id && workspaceLanguage === 'python' && snapshot" :key="'interfaces-' + workspace.id"
+          :project-id="pid" :workspace-id="workspace.id" :latest-snapshot-id="snapshot.id" />
         <WorkspaceCodeGeneration v-if="workspace.design_flow_id" :key="workspace.id" :workspace-id="workspace.id" :language-label="languageLabel(workspaceLanguage)"
           :workspace-version="workspace.version" :snapshot-id="snapshot?.id || null" :has-unsaved-files="hasUnsavedFiles"
           :disabled="busy || executing || loading" :actor="actor" :reason="reason"

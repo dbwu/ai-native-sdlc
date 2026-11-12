@@ -1,4 +1,5 @@
 """三轮选课端到端验收，模型响应使用教学替身，业务测试实际执行。"""
+from pathlib import Path
 from uuid import UUID
 
 import pytest
@@ -21,20 +22,22 @@ CASES = (
 def _design_fixture(context):
     ids = [item['id'] for item in context['requirements']]
     scenarios = CASES[:len(ids)]
+    # 教学导入独立维护项目基线的 Enrollment，这个固定响应单独验证生成设计和工程交付。
+    component_key = 'EnrollmentDesign'
     sequence = [{
         'title': title, 'requirement_ids': [rid],
-        'participants': [{'key': 'Student', 'name': '学生'}, {'key': 'Enrollment', 'name': '选课服务'}],
-        'messages': [{'source': 'Student', 'target': 'Enrollment', 'label': '提交选课'},
-                     {'source': 'Enrollment', 'target': 'Student', 'label': outcome}],
+        'participants': [{'key': 'Student', 'name': '学生'}, {'key': component_key, 'name': '选课办理设计'}],
+        'messages': [{'source': 'Student', 'target': component_key, 'label': '提交选课'},
+                     {'source': component_key, 'target': 'Student', 'label': outcome}],
     } for rid, (_, _, title, outcome, _) in zip(ids, scenarios)]
     return {
         'summary': context['title'],
         'assumptions': ['本候选使用教学验收固定响应，供核对需求、设计及审阅流程。'],
-        'components': [{'key': 'Enrollment', 'name': '选课办理设计', 'requirement_ids': ids,
+        'components': [{'key': component_key, 'name': '选课办理设计', 'requirement_ids': ids,
                         'responsibility': '、'.join(case[2] for case in scenarios)}],
-        'interfaces': [{'key': 'Enroll', 'name': '提交选课接口', 'component_key': 'Enrollment', 'protocol': 'HTTP',
+        'interfaces': [{'key': 'Enroll', 'name': '提交选课接口', 'component_key': component_key, 'protocol': 'HTTP',
                         'contract': {'method': 'POST', 'path': '/enroll'}, 'requirement_ids': ids}],
-        'data_models': [{'key': 'Record', 'name': '学生选课记录', 'component_key': 'Enrollment',
+        'data_models': [{'key': 'Record', 'name': '学生选课记录', 'component_key': component_key,
                          'schema_definition': {'unique': ['student', 'offering']}, 'requirement_ids': ids}],
         'test_plan': [{'key': f'Scenario{index}', 'name': title, 'requirement_ids': [rid],
                        'steps': ['准备该场景的教学班与学生记录', '提交选课'], 'expected_result': outcome}
@@ -46,11 +49,11 @@ def _design_fixture(context):
             'associations': [{'actor': 'Student', 'use_case': 'Enroll'}],
         }],
         'collaboration_links': [
-            {'source': {'kind': 'interface', 'key': 'Enroll'}, 'target': {'kind': 'component', 'key': 'Enrollment'},
+            {'source': {'kind': 'interface', 'key': 'Enroll'}, 'target': {'kind': 'component', 'key': component_key},
              'type': 'calls', 'rationale': '选课入口将请求交给负责本轮规则的选课办理模块。', 'requirement_ids': ids},
-            {'source': {'kind': 'component', 'key': 'Enrollment'}, 'target': {'kind': 'data_model', 'key': 'Record'},
+            {'source': {'kind': 'component', 'key': component_key}, 'target': {'kind': 'data_model', 'key': 'Record'},
              'type': 'reads', 'rationale': '先查原记录以保留重复请求的幂等行为，并读取本轮规则所需的已选记录。', 'requirement_ids': ids},
-            {'source': {'kind': 'component', 'key': 'Enrollment'}, 'target': {'kind': 'data_model', 'key': 'Record'},
+            {'source': {'kind': 'component', 'key': component_key}, 'target': {'kind': 'data_model', 'key': 'Record'},
              'type': 'writes', 'rationale': '首次选课通过本轮检查后再写入唯一选课记录。', 'requirement_ids': ids},
         ],
     }
@@ -74,6 +77,9 @@ def exercise_course_journey(client, db_url, project, monkeypatch):
     baseline_url = workbench + '/project-model'
     releases = ('v1', 'v1.1', 'v1.2')
     builds = {f'选课需求设计 {release}': build_course(release) for release in releases}
+    adapter = Path(__file__).resolve().parents[1] / 'examples' / 'course-selection' / 'app.py'
+    for build in builds.values():
+        build['files']['app.py'] = adapter.read_text(encoding='utf-8')
     design_inputs, code_inputs, saved_versions, results = [], [], [], []
 
     def design_model(context, schema, **kwargs):
@@ -159,7 +165,7 @@ def exercise_course_journey(client, db_url, project, monkeypatch):
         expected_files = builds[title]['files']
         assert changes == {path: {'path': path, 'operation': 'modify' if previous else 'add',
                                   'before': previous_files.get(path), 'after': content}
-                           for path, content in expected_files.items()}
+                           for path, content in expected_files.items() if previous_files.get(path) != content}
         assert cases[-1][4] in changes['test_course_app.py']['after']
         assert cases[-1][4] not in (changes['test_course_app.py']['before'] or '')
         assert _read(client, work)['latest_snapshot'] == base
@@ -167,6 +173,15 @@ def exercise_course_journey(client, db_url, project, monkeypatch):
         assert _read(client, review_url)['applied_snapshot_id'] == saved['id']
         saved_files = {file['path']: file['content'] for file in saved['files']}
         assert saved_files == expected_files
+        comparison = _read(client, work + f'/snapshots/{saved["id"]}/interface-comparison')
+        assert comparison['snapshot']['sha256'] == saved['sha256']
+        assert comparison['design']['id'] == flow['id']
+        assert comparison['diagnostics'] == []
+        assert [(row['method'], row['path'], row['status']) for row in comparison['rows']] == [('POST', '/enroll', 'matched')]
+        evidence = comparison['rows'][0]['implementation'][0]['evidence']
+        assert evidence['file'] == 'app.py'
+        assert evidence['file_sha256'] == next(file['sha256'] for file in saved['files'] if file['path'] == 'app.py')
+        assert saved_files['app.py'].splitlines()[evidence['line'] - 1] in evidence['snippet']
         report = run_course(release, saved_files['course_app.py'])
         assert report['executed'] and report['passed'] and report['tests_run'] == test_count, report['stderr']
         for old_work, old_saved in saved_versions:
@@ -181,4 +196,18 @@ def exercise_course_journey(client, db_url, project, monkeypatch):
 @pytest.mark.integration
 def test_fresh_course_journey_reviews_design_and_carries_saved_code_through_three_releases(
         client, db_url, project, monkeypatch, model_environment):
-    exercise_course_journey(client, db_url, project, monkeypatch)
+    first, _, latest = exercise_course_journey(client, db_url, project, monkeypatch)
+    workspace, snapshot = latest['workspace'], latest['snapshot']
+    work = f'/engineering/workspaces/{workspace["id"]}'
+    assert client.get(work + f'/snapshots/{first["snapshot"]["id"]}/interface-comparison').status_code == 404
+    changed_files = [{'path': file['path'], 'content': file['content'].replace("'/enroll'", "'/enrollments'")
+                      if file['path'] == 'app.py' else file['content']} for file in snapshot['files']]
+    current = _read(client, work)['workspace']
+    drift = _post(client, work + '/snapshots', 201, {
+        'expected_version': current['version'], 'actor': ACTOR, 'reason': '独立对照案例：修改接口路径', 'files': changed_files,
+    })['latest_snapshot']
+    assert _read(client, work + '/snapshots')[0]['id'] == drift['id']
+    difference = _read(client, work + f'/snapshots/{drift["id"]}/interface-comparison')
+    assert {row['path']: row['status'] for row in difference['rows']} == {'/enroll': 'missing', '/enrollments': 'extra'}
+    original = _read(client, work + f'/snapshots/{snapshot["id"]}/interface-comparison')
+    assert [row['status'] for row in original['rows']] == ['matched']

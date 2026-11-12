@@ -4,6 +4,7 @@ from uuid import UUID
 from fastapi import APIRouter
 
 from .code_generation import CodeGenerationAction, CodeGenerationService
+from .interface_comparison import InterfaceComparisonService
 from .workspace import (ExecutionCancel, ExecutionCreate, SnapshotCreate, WorkspaceCreate,
                         WorkspaceService, executor_statuses)
 
@@ -36,6 +37,15 @@ def workspace_router(url_provider):
     @router.post('/workspaces/{workspace_id}/snapshots', status_code=201, summary='保存完整不可变工程文件快照')
     def snapshot(workspace_id: UUID, body: SnapshotCreate):
         return service().snapshot(workspace_id, body)
+
+    @router.get('/workspaces/{workspace_id}/snapshots', summary='列出工程文件快照版本与摘要')
+    def snapshots(workspace_id: UUID):
+        return InterfaceComparisonService(url_provider()).snapshots(workspace_id)
+
+    @router.get('/workspaces/{workspace_id}/snapshots/{snapshot_id}/interface-comparison',
+                summary='将固定快照中的 FastAPI 路由与已确认设计对照')
+    def interface_comparison(workspace_id: UUID, snapshot_id: UUID):
+        return InterfaceComparisonService(url_provider()).read(workspace_id, snapshot_id)
 
     @router.get('/workspaces/{workspace_id}/code-generations', summary='查看工作区代码生成记录')
     def code_generations(workspace_id: UUID):

@@ -4,6 +4,8 @@ from uuid import uuid4
 
 import pytest
 
+from knowledge import model_gateway
+from test_design import action, create, fake_model, generate, model_environment, requirement
 from test_generic_workflow import approve
 
 
@@ -24,6 +26,55 @@ def _propose_example(client, path, version, release, status=201):
 
 def _process(baseline, key):
     return next(item for item in baseline['processes'] if item['key'] == key)
+
+
+@pytest.mark.integration
+def test_model_project_baseline_preserves_confirmed_input_and_requires_review(
+        client, db_url, project, requirement, fake_model, model_environment, monkeypatch):
+    path = f'/workbench/projects/{project["id"]}/project-model'
+    draft = create(client, project, requirement)
+    request = {'design_id': draft['flow']['id'], 'expected_version': 0, 'actor': ACTOR}
+    assert client.post(path + '/model-draft', json=request).status_code == 409
+    detail = generate(client, db_url, action(client, draft, 'start'))
+    for step in ('validate', 'commit', 'complete'):
+        detail = action(client, detail, step)
+
+    observed = []
+
+    def complete(context, schema, *, on_exchange):
+        observed.append(context)
+        assert schema['title'] == 'ProjectModel'
+        on_exchange({'request': {'model': '验收模型', 'messages': []}, 'response': {'content': '真实响应占位'}})
+        component = next(row for row in context['confirmed_artifacts'] if row['kind'] == 'ArchitectureComponent')
+        ref = {'id': requirement['id'], 'version': requirement['version']}
+        return {'trace': {'provider': 'test', 'model': '验收模型', 'request_id': 'trace', 'prompt_version': 'v1',
+                          'input_sha256': 'a' * 64, 'output_sha256': 'b' * 64},
+                'document': {'title': '模型提出的选课架构', 'nodes': [
+                    {'key': 'Course', 'name': '选课领域', 'kind': 'domain'},
+                    {'key': 'Enrollment', 'name': '选课办理', 'kind': 'module', 'parent_key': 'Course',
+                     'description': '办理选课并保护记录一致性。', 'entity_id': component['id'], 'entity_version': component['version']},
+                ], 'processes': [{'key': 'Enroll', 'name': '办理选课', 'requirement_refs': [ref],
+                                  'steps': [{'key': 'Start', 'name': '开始', 'kind': 'start', 'owner': 'Enrollment'},
+                                            {'key': 'End', 'name': '完成', 'kind': 'end', 'owner': 'Enrollment'}],
+                                  'transitions': [{'key': 'Finish', 'source': 'Start', 'target': 'End'}]}]}}
+
+    monkeypatch.setattr(model_gateway, 'complete_project_model', complete)
+    response = client.post(path + '/model-draft', json=request)
+    assert response.status_code == 201, response.text
+    proposal = response.json()
+    assert proposal['status'] == 'pending' and _read(client, path)['baseline'] is None
+    assert observed[0]['confirmed_design'] == detail['design']
+    assert observed[0]['requirements'][0]['id'] == requirement['id']
+    diff = _read(client, f'/workbench/proposals/{proposal["id"]}/diff')
+    assert diff['project_model_origin']['design_id'] == request['design_id']
+    assert [item['kind'] for item in diff['project_model_preview']] == ['logical_structure', 'activity']
+    exchange = _read(client, f'/workbench/proposals/{proposal["id"]}/project-model-exchange')
+    assert exchange['response']['content'] == '真实响应占位'
+    approve(client, proposal)
+    assert _read(client, path)['baseline']['model_origin'] == diff['project_model_origin']
+    assert '模型分析 验收模型' in client.get(path + '/markdown?version=1').text
+    assert client.post(path + '/model-draft', json={**request, 'expected_version': 1}).status_code == 409
+    assert len(observed) == 1
 
 
 @pytest.mark.integration

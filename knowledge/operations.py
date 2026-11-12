@@ -186,6 +186,10 @@ class KnowledgeOperations:
             if latest != proposal["source_version"]:
                 raise KnowledgeError("来源已有更新快照，请基于最新来源版本生成提案", 409)
         plan = proposal["plan"]
+        if 'design_baseline_version' not in plan and conn.execute('''SELECT 1 FROM current_design_flows
+                WHERE project_id=%s AND definition ? 'project_model_version' AND state->>'design_proposal_id'=%s''',
+                (proposal['project_id'], str(proposal['id']))).fetchone():
+            raise KnowledgeError('请先在需求设计页重新关联固定的项目基线，再校验或提交设计', 409)
         extraction = plan.get("extraction")
         binding_source = proposal['source_id']
         if extraction:

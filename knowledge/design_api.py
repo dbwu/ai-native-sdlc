@@ -37,7 +37,7 @@ def design_router(url_provider):
         return service().model_exchange(flow_id, job_id)
 
     @router.post('/flows/{flow_id}/actions/{action}', summary='确认需求、生成设计及明确审阅确认')
-    def action(flow_id: UUID, action: Literal['start', 'generate', 'generate_confirmed', 'validate', 'commit', 'complete', 'reject', 'cancel'],
+    def action(flow_id: UUID, action: Literal['start', 'generate', 'generate_confirmed', 'rebind_baseline', 'validate', 'commit', 'complete', 'reject', 'cancel'],
                body: DesignAction, response: Response):
         result = service().action(flow_id, action, body)
         if action in {'generate', 'generate_confirmed'}:

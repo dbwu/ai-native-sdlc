@@ -12,6 +12,8 @@ import pytest
 from knowledge import model_gateway
 from knowledge.db import connect
 from knowledge.design import DesignService, sha256
+from knowledge.project_model import ProjectModel
+from knowledge.project_model_generation import _validate_model
 from knowledge.semantics import KnowledgeError
 from test_generic_workflow import approve
 
@@ -151,6 +153,85 @@ def test_new_requirement_design_reads_only_the_project_baseline_pinned_at_creati
     assert [node['key'] for node in reference['model']['nodes']] == ['Course', 'Enrollment']
     assert first['jobs'][0]['trace']['context_sha256'] == sha256(fake_model[0])
     assert client.get(path).json()['baseline']['version'] == 2
+
+
+def test_rebind_saved_design_keeps_baseline_entity_versions_and_new_knowledge_separate(
+        client, db_url, project, requirement, fake_model, monkeypatch):
+    first = generate(client, db_url, action(client, create(client, project, requirement), 'start'))
+    first = action(client, action(client, action(client, first, 'validate'), 'commit'), 'complete')
+    original = {entry['key']: entry['entity_id'] for entry in first['proposal']['plan']['entity_mapping']}
+    component, interface, data = (original[key] for key in ('ArchitectureComponent:Enrollment', 'Interface:EnrollApi', 'DataModel:EnrollmentData'))
+    path = f'/workbench/projects/{project["id"]}/project-model'
+    response = client.post(path, json={'expected_version': 0, 'actor': '基线审阅者', 'model': {'title': '选课基线', 'nodes': [
+        {'key': 'Course', 'name': '选课', 'kind': 'domain'},
+        {'key': 'Enrollment', 'name': '选课计数服务', 'kind': 'module', 'parent_key': 'Course',
+         'entity_id': component, 'entity_version': 1}], 'architecture_ports': [
+        {'key': 'EnrollApi', 'name': '选课接口设计', 'kind': 'interface', 'knowledge': {'id': interface, 'version': 1}},
+        {'key': 'EnrollmentData', 'name': '选课记录结构', 'kind': 'data_model', 'knowledge': {'id': data, 'version': 1}}]}})
+    assert response.status_code == 201, response.text
+    approve(client, response.json())
+
+    def changed(context, schema, **kwargs):
+        design = document(context)
+        design['components'][0]['responsibility'] = '锁定教学班再检查容量。'
+        design['interfaces'][0]['contract']['full_result'] = 'capacity_reached'
+        design['data_models'].append({**design['data_models'][0], 'key': 'ClassCapacity', 'name': '教学班容量'})
+        return returned(design)
+
+    monkeypatch.setattr(model_gateway, 'complete_design', changed)
+    plan = DesignService._proposal_plan
+    with monkeypatch.context() as legacy:
+        def legacy_plan(self, *args):
+            result = plan(self, *args)
+            result.pop('design_baseline_version')
+            return result
+        legacy.setattr(DesignService, '_baseline_bindings', staticmethod(lambda *_: {}))
+        legacy.setattr(DesignService, '_proposal_plan', legacy_plan)
+        before = generate(client, db_url, action(client, create(client, project, requirement), 'start'))
+    old_id = before['proposal']['id']
+    assert before['needs_baseline_rebind']
+    assert all(item['op'] == 'create_entity' for item in before['proposal']['plan']['operations'] if item['op'].endswith('_entity'))
+    blocked = action(client, before, 'validate')
+    assert blocked['proposal']['status'] == 'pending' and not blocked['proposal']['result']['valid']
+    after = action(client, blocked, 'rebind_baseline')
+    assert after['flow']['id'] == before['flow']['id'] and after['jobs'] == before['jobs']
+    assert after['proposal']['plan']['replaces_proposal_id'] == old_id
+    assert client.get(f'/operations/proposals/{old_id}').json()['status'] == 'rejected'
+    assert not after['needs_baseline_rebind'] and after['proposal']['status'] == 'pending'
+    changes = client.get(f'/workbench/proposals/{after["proposal"]["id"]}/diff').json()['changes']
+    by_id = {item['id']: item for item in changes}
+    for record_id in (component, interface):
+        item = by_id[record_id]
+        assert item['op'] == 'update_entity' and item['before']['id'] == item['after']['id'] == record_id
+        assert (item['before']['version'], item['after']['version']) == (1, 2)
+    assert data not in by_id
+    capacity = next(item for item in changes if item['name'] == '教学班容量')
+    assert capacity['op'] == 'create_entity' and capacity['before'] is None and capacity['after']['version'] == 1
+    assert any(item['op'] == 'update_relationship' and item['before']['type'] == 'CONTAINS' for item in changes)
+    after = action(client, after, 'validate')
+    assert after['proposal']['status'] == 'validated', after['proposal']['result']
+    assert client.get(f'/entities/{interface}').json()['version'] == 1
+    completed = action(client, action(client, after, 'commit'), 'complete')
+    assert completed['flow']['status'] == 'COMPLETED'
+    assert any(ref['id'] == data and ref['version'] == 1 for ref in completed['flow']['state']['artifact_versions'])
+    assert client.get(f'/entities/{interface}').json()['version'] == 2
+    baseline = client.get(path).json()['baseline']
+    assert baseline['model']['architecture_ports'][0]['knowledge']['version'] == 1
+
+    # 后续项目基线可采用本轮已确认的同一知识新版本，原项目基线 v1 仍引用知识 v1。
+    artifacts = [{'id': component, 'version': 2, 'kind': 'ArchitectureComponent'},
+                 {'id': interface, 'version': 2, 'kind': 'Interface'}]
+    advanced = _validate_model(ProjectModel.model_validate(baseline['model']),
+                               {'project_baseline': baseline, 'confirmed_artifacts': artifacts, 'requirements': [], 'knowledge': []})
+    assert advanced.nodes[1].entity_version == 2
+    assert advanced.architecture_ports[0].knowledge.version == 2
+    assert advanced.architecture_ports[1].knowledge.version == 1
+
+    stale = generate(client, db_url, action(client, create(client, project, requirement), 'start'))
+    stale = action(client, stale, 'validate')
+    assert stale['proposal']['status'] == 'pending'
+    assert stale['proposal']['result']['errors'][0]['status_code'] == 409
+    assert client.get(f'/entities/{interface}').json()['version'] == 2
 
 
 @pytest.mark.parametrize('outcome', ['success', 'truncated', 'timeout'])
