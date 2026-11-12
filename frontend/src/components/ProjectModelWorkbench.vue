@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { request } from '../api/client'
 import { dateTime } from '../lib/display'
@@ -8,6 +8,7 @@ import DiagramPreview, { type DesignDiagram } from './DiagramPreview.vue'
 import ProjectArchitectureTree, { type ArchitectureNode } from './ProjectArchitectureTree.vue'
 import ProjectModelChanges, { type ProjectModelChange } from './ProjectModelChanges.vue'
 import ProjectDiagramComparison from './ProjectDiagramComparison.vue'
+import ProjectArchitectureCollaboration, { type ArchitecturePort, type ProjectCollaborationLink } from './ProjectArchitectureCollaboration.vue'
 
 type Reference = { id: string; version: number; name?: string }
 type Process = { key: string; name: string; description: string; diagrams: DesignDiagram[]; requirement_refs?: Reference[]; rule_refs?: Reference[] }
@@ -19,10 +20,14 @@ type Baseline = Version & {
     summary: string
     nodes: ArchitectureNode[]
     dependencies: { source: string; target: string; label: string }[]
-    processes: { key: string; requirement_refs: Reference[]; rule_refs?: Reference[] }[]
+    processes: { key: string; name: string; scenarios: { key: string; name: string }[]; requirement_refs: Reference[]; rule_refs?: Reference[] }[]
+    architecture_ports?: ArchitecturePort[]
+    collaboration_links?: ProjectCollaborationLink[]
   }
   node_versions?: Record<string, number>
   architecture: DesignDiagram
+  logical_structure?: DesignDiagram
+  collaboration?: DesignDiagram | null
   processes: Process[]
   changes: ProjectModelChange[]
   download_url: string
@@ -62,6 +67,7 @@ const tab = ref<'architecture' | 'processes' | 'changes' | 'comparison'>(
   typeof route.query.compare === 'string' ? 'comparison' : 'architecture',
 )
 const initialBefore = computed(() => typeof route.query.compare === 'string' ? Number(route.query.compare) : undefined)
+const architectureView = ref<'structure' | 'collaboration'>(route.query.arch === 'collaboration' ? 'collaboration' : 'structure')
 const versionQuery = computed({
   get: () => typeof route.query.baseline === 'string' ? route.query.baseline : '',
   set: version => {
@@ -73,6 +79,7 @@ const baseline = ref<Baseline | null>(null)
 const loading = ref(false)
 const loadError = ref('')
 const processKey = ref('')
+const processSection = ref<HTMLElement>()
 const scenarioIndex = ref(0)
 const actor = ref(state.actor || '本地维护者')
 const release = ref('v1')
@@ -120,6 +127,14 @@ watch(() => [path.value, props.refreshKey, versionQuery.value], async () => {
 }, { immediate: true })
 
 watch(() => [baseline.value?.version, currentProcess.value?.key], () => { scenarioIndex.value = 0 })
+
+async function openProcess(key: string, scenario?: string) {
+  processKey.value = key
+  tab.value = 'processes'
+  await nextTick()
+  if (scenario) scenarioIndex.value = Math.max(0, processDefinition.value?.scenarios.findIndex(item => item.key === scenario) ?? 0)
+  processSection.value?.scrollIntoView({ block: 'start' })
+}
 
 function setExpanded(event: Event) {
   expanded.value = (event.currentTarget as HTMLDetailsElement).open
@@ -189,7 +204,13 @@ function submitDraft() {
           <button type="button" class="button" :class="tab === 'comparison' ? 'primary' : 'secondary'" :aria-pressed="tab === 'comparison'" @click="tab = 'comparison'">版本对照</button>
         </div>
 
-        <section v-if="tab === 'architecture'" class="model-grid" aria-label="架构总览">
+        <div v-if="tab === 'architecture'" class="architecture-tabs" aria-label="架构视图">
+          <button type="button" class="button" :class="architectureView === 'structure' ? 'primary' : 'secondary'"
+            :aria-pressed="architectureView === 'structure'" @click="architectureView = 'structure'">逻辑结构</button>
+          <button type="button" class="button" :class="architectureView === 'collaboration' ? 'primary' : 'secondary'"
+            :aria-pressed="architectureView === 'collaboration'" @click="architectureView = 'collaboration'">接口与协作</button>
+        </div>
+        <section v-if="tab === 'architecture' && architectureView === 'structure'" class="model-grid" aria-label="架构总览">
           <section class="model-directory" aria-label="领域与模块目录">
             <h4>领域与模块目录</h4>
             <p class="section-label">点击条目逐级展开。</p>
@@ -197,19 +218,25 @@ function submitDraft() {
               :node-versions="baseline.node_versions ?? {}" :project-id="projectId" :parent-key="null"/>
           </section>
           <div class="model-detail">
-            <DiagramPreview :diagram="baseline.architecture"/>
-            <h4>模块依赖</h4>
-            <ul v-if="baseline.model.dependencies.length" class="dependency-list">
-              <li v-for="dependency in baseline.model.dependencies" :key="`${dependency.source}:${dependency.target}:${dependency.label}`">
-                <strong>{{ nodeNames.get(dependency.source) }}</strong> → <strong>{{ nodeNames.get(dependency.target) }}</strong>
-                <span>{{ dependency.label }}</span>
-              </li>
-            </ul>
-            <p v-else class="section-label">这版基线没有记录模块依赖。</p>
+            <p class="section-label">图中边框表示领域归属。子模块及职责可从目录展开。</p>
+            <DiagramPreview :diagram="baseline.logical_structure || baseline.architecture" compact/>
+            <details v-if="baseline.model.dependencies.length">
+              <summary>查看模块依赖（{{ baseline.model.dependencies.length }} 项）</summary>
+              <ul class="dependency-list">
+                <li v-for="dependency in baseline.model.dependencies" :key="`${dependency.source}:${dependency.target}:${dependency.label}`">
+                  <strong>{{ nodeNames.get(dependency.source) }}</strong> → <strong>{{ nodeNames.get(dependency.target) }}</strong>
+                  <span>{{ dependency.label }}</span>
+                </li>
+              </ul>
+            </details>
           </div>
         </section>
+        <ProjectArchitectureCollaboration v-else-if="tab === 'architecture'" :diagram="baseline.collaboration"
+          :nodes="baseline.model.nodes" :ports="baseline.model.architecture_ports ?? []"
+          :links="baseline.model.collaboration_links ?? []" :processes="baseline.model.processes"
+          :project-id="projectId" @open-process="openProcess"/>
 
-        <section v-else-if="tab === 'processes'" class="model-grid" aria-label="业务流程目录">
+        <section v-else-if="tab === 'processes'" ref="processSection" class="model-grid" aria-label="业务流程目录">
           <section class="model-directory" aria-label="主要业务流程">
             <h4>主要业务流程</h4>
             <ul v-if="baseline.processes.length" class="process-list">
@@ -246,7 +273,8 @@ function submitDraft() {
         </section>
 
         <ProjectDiagramComparison v-else-if="tab === 'comparison'" :key="baseline.version" :path="path"
-          :versions="versions" :current-version="baseline.version" :initial-before="initialBefore"/>
+          :versions="versions" :current-version="baseline.version" :initial-before="initialBefore"
+          :initial-kind="route.query.arch === 'collaboration' ? 'collaboration' : undefined"/>
         <section v-else class="changes-pane" aria-label="本轮变更">
           <h4>{{ baseline.version === 1 ? '首次发布的内容' : `与上一轮基线相比 · v${baseline.version - 1} → v${baseline.version}` }}</h4>
           <ProjectModelChanges :changes="baseline.changes"/>
@@ -297,6 +325,7 @@ function submitDraft() {
 .project-model select { max-width: 100%; min-width: 0; padding: 7px 9px; border: 1px solid var(--line); border-radius: 7px; background: #fcfdfe; color: var(--ink); }
 .baseline-title { margin-top: 12px; }
 .baseline-summary { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 3px; }
+.architecture-tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-block: 10px; }
 .model-grid { display: grid; grid-template-columns: minmax(190px, 255px) minmax(0, 1fr); gap: 12px; align-items: start; margin-top: 10px; }
 .model-directory, .model-detail, .changes-pane { min-width: 0; padding: 10px; border: 1px solid var(--line); border-radius: 7px; }
 .dependency-list, .process-list, .reference-list { list-style: none; margin: 7px 0; padding: 0; overflow-wrap: anywhere; }

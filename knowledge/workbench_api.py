@@ -45,7 +45,7 @@ def workbench_router(url_provider):
     @router.get('/projects/{project_id}/project-model/comparison', summary='对照两个已确认基线的 Mermaid 图')
     def project_model_comparison(project_id: UUID, before_version: int = Query(ge=0),
                                  after_version: int = Query(ge=1),
-                                 kind: Literal['architecture', 'activity', 'sequence'] = 'architecture',
+                                 kind: Literal['architecture', 'activity', 'sequence', 'collaboration'] = 'architecture',
                                  process_key: Key | None = None, scenario_key: Key | None = None,
                                  ):
         return read_comparison(url_provider(), project_id, before_version, after_version, kind, process_key, scenario_key)

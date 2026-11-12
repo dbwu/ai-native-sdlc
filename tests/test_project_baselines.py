@@ -66,6 +66,13 @@ def test_course_project_architecture_processes_and_three_version_diffs(client, p
         assert baseline['comparison'] == {'before_version': index or None, 'after_version': index + 1}
         assert baseline['architecture']['baseline_ref'] == {
             'project_id': project['id'], 'version': index + 1, 'proposal_id': candidate['id']}
+        structure = baseline['logical_structure']['mermaid']
+        assert 'subgraph' in structure and '包含' not in structure
+        assert '余位校验' not in structure and '课表冲突校验' not in structure
+        assert len(baseline['collaboration']['edges']) == (5, 8, 11)[index]
+        ports = {item['key']: item for item in baseline['model']['architecture_ports']}
+        assert ports['SubmitApi']['knowledge']['id'] == source_refs['IF-ENROLL']['entity_id']
+        assert ports['OfferingData']['knowledge']['version'] == source_refs['DM-ENROLL']['version']
         assert baseline['title'].endswith(release)
         assert baseline['confirmed_at']
         nodes = {item['key']: item for item in baseline['model']['nodes']}
@@ -140,7 +147,19 @@ def test_course_project_architecture_processes_and_three_version_diffs(client, p
         assert report['overlay']['mermaid'] in export.text
         assert client.get(compare_path, params={**params, 'before_version': index + 1}).status_code == 422
         assert client.get(compare_path, params={**params, 'after_version': index + 2}).status_code == 404
+        collab = _read_collaboration(client, compare_path, index, index + 1)
+        assert '【新增】' in collab['overlay']['mermaid']
+        assert ('【修改】写入' in collab['overlay']['mermaid']) == bool(index)
+        if index:
+            expected = '读取容量上限' if index == 1 else '读取目标和已选教学班时段'
+            assert f'【新增】读取：{expected}' in collab['overlay']['mermaid']
         versions.append(baseline)
+
+
+def _read_collaboration(client, path, before, after):
+    response = client.get(path, params={'before_version': before, 'after_version': after, 'kind': 'collaboration'})
+    assert response.status_code == 200, response.text
+    return response.json()
 
 
 @pytest.mark.integration

@@ -4,7 +4,7 @@ import { request } from '../api/client'
 import DiagramPreview, { type DesignDiagram } from './DiagramPreview.vue'
 import ProjectModelChanges, { type ProjectModelChange } from './ProjectModelChanges.vue'
 
-type Kind = 'architecture' | 'activity' | 'sequence'
+type Kind = 'architecture' | 'activity' | 'sequence' | 'collaboration'
 type View = 'overlay' | 'split' | 'before' | 'after'
 type Version = { version: number; title: string }
 type Choice = { key: string; name: string }
@@ -20,8 +20,9 @@ type Comparison = {
   changes: ProjectModelChange[]
 }
 
-const props = defineProps<{ path: string; versions: Version[]; currentVersion: number; initialBefore?: number }>()
-const kind = ref<Kind>('architecture')
+const props = defineProps<{ path: string; versions: Version[]; currentVersion: number; initialBefore?: number; initialKind?: Kind }>()
+const kind = ref<Kind>(props.initialKind ?? 'architecture')
+const needsProcess = computed(() => kind.value === 'activity' || kind.value === 'sequence')
 const view = ref<View>('overlay')
 const after = ref(props.currentVersion)
 const previous = computed(() => props.versions.filter(item => item.version < after.value))
@@ -42,7 +43,7 @@ const selectedProcess = computed(() => processKey.value || report.value?.selecti
 const scenarios = computed(() => processOptions.value.find(item => item.key === selectedProcess.value)?.scenarios ?? [])
 const query = computed(() => {
   const params = new URLSearchParams({ before_version: String(before.value), after_version: String(after.value), kind: kind.value })
-  if (kind.value !== 'architecture' && processKey.value) params.set('process_key', processKey.value)
+  if (needsProcess.value && processKey.value) params.set('process_key', processKey.value)
   if (kind.value === 'sequence' && scenarioKey.value) params.set('scenario_key', scenarioKey.value)
   return params.toString()
 })
@@ -100,11 +101,12 @@ onBeforeUnmount(() => { ++generation })
       <label class="field">图表
         <select v-model="kind" aria-label="图表" @change="resetSelection">
           <option value="architecture">项目架构图</option>
+          <option value="collaboration">接口与协作图</option>
           <option value="activity">业务流程泳道图</option>
           <option value="sequence">业务时序图</option>
         </select>
       </label>
-      <label v-if="kind !== 'architecture' && processOptions.length" class="field">业务流程
+      <label v-if="needsProcess && processOptions.length" class="field">业务流程
         <select :value="selectedProcess" aria-label="对照业务流程" :disabled="loading"
           @change="processKey = ($event.target as HTMLSelectElement).value; scenarioKey = ''">
           <option v-for="item in processOptions" :key="item.key" :value="item.key">{{ item.name }}</option>

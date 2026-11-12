@@ -151,10 +151,56 @@ def _browse_process(requirement):
             ])], 'requirement_refs': [requirement]}
 
 
+def _enrollment_collaboration(release):
+    """用教学设计与参考实现中明确的协作编排三轮示例。"""
+    def submit(key, source, target, kind, label, rationale, *scenes):
+        return {'key': key, 'source': source, 'target': target, 'type': kind, 'label': label,
+                'rationale': rationale, 'process_key': 'SubmitEnrollment', 'scenario_keys': scenes}
+
+    write_basis = {
+        'v1': '首次提交时在事务内保存唯一的学生与教学班选课记录。',
+        'v1.1': '在同一事务内完成余位检查和记录写入，防止最后一个名额被重复占用。',
+        'v1.2': '同一事务内先检查课表冲突与余位，再写入记录。任一校验拒绝时均无新增写入。',
+    }
+    links = [
+        submit('SubmitCall', 'SubmitApi', 'Enrollment', 'calls', '办理选课请求',
+               '选课 HTTP 接口将学生和教学班交给选课服务处理。', 'Success', 'Duplicate'),
+        submit('OfferingLookup', 'Enrollment', 'OfferingData', 'reads', '核对教学班是否存在',
+               '提交选课时先校验目标教学班。', 'Success', 'Duplicate'),
+        submit('ExistingRecord', 'Enrollment', 'RecordData', 'reads', '查询原选课记录',
+               '相同学生和教学班的重复请求直接返回原记录。', 'Success', 'Duplicate'),
+        submit('SaveRecord', 'Enrollment', 'RecordData', 'writes', '保存新选课记录',
+               write_basis[release], 'Success'),
+        {'key': 'RecordOfferingName', 'source': 'Record', 'target': 'Offering', 'type': 'depends_on',
+         'label': '依赖教学班名称', 'rationale': '本人已选列表需要展示对应教学班的名称。',
+         'process_key': 'ViewEnrollments', 'scenario_keys': ['List']},
+    ]
+    if release != 'v1':
+        links.extend([
+            submit('CapacityCheck', 'Enrollment', 'Capacity', 'calls', '检查剩余名额',
+                   '首次新增需要检查余位，已选学生的重复请求直接返回。', 'Success', 'Full'),
+            submit('ReadCapacity', 'Capacity', 'OfferingData', 'reads', '读取容量上限',
+                   '读取目标教学班的非负整数容量。', 'Success', 'Full'),
+            submit('CountEnrollments', 'Capacity', 'RecordData', 'reads', '统计有效选课人数',
+                   '将当前有效记录数与目标教学班容量比较。', 'Success', 'Full'),
+        ])
+    if release == 'v1.2':
+        links.extend([
+            submit('ScheduleCheck', 'Enrollment', 'Timetable', 'calls', '检查固定周课表冲突',
+                   '首次新增先比较本人课表，再判断目标教学班余位。', 'Success', 'TimeConflict', 'Full'),
+            submit('ReadSchedule', 'Timetable', 'OfferingData', 'reads', '读取目标和已选教学班时段',
+                   '同星期的节次按闭区间比较，任意时段重叠就拒绝新增。', 'Success', 'TimeConflict'),
+            submit('ReadStudentRecords', 'Timetable', 'RecordData', 'reads', '读取本人已选记录',
+                   '冲突判断只比较当前学生的已选教学班。', 'Success', 'TimeConflict'),
+        ])
+    return links
+
+
 def course_model(conn, project_id, release):
     summary, requirements, rules = _RELEASES[release]
     refs = _knowledge_refs(conn, project_id, release)
-    required = ('DOMAIN-COURSE', 'COMP-ENROLL', 'REQ-ENROLL', 'BR-UNIQUE', *requirements, *rules)
+    required = ('DOMAIN-COURSE', 'COMP-ENROLL', 'REQ-ENROLL', 'BR-UNIQUE',
+                'IF-ENROLL', 'DM-ENROLL', *requirements, *rules)
     if any(key not in refs for key in required):
         raise KnowledgeError(f'请先导入、校验并确认提交选课教学知识 {release}', 409)
 
@@ -187,6 +233,12 @@ def course_model(conn, project_id, release):
         'title': f'选课系统项目基线 {release}',
         'summary': summary + '领域与模块是教学用逻辑划分，沿用选课参考应用的业务行为。',
         'nodes': nodes, 'dependencies': dependencies,
+        'architecture_ports': [
+            {'key': 'SubmitApi', 'name': '提交选课接口', 'kind': 'interface', 'knowledge': refs['IF-ENROLL']},
+            {'key': 'OfferingData', 'name': '教学班信息', 'kind': 'data_model', 'knowledge': refs['DM-ENROLL']},
+            {'key': 'RecordData', 'name': '选课记录', 'kind': 'data_model', 'knowledge': refs['DM-ENROLL']},
+        ],
+        'collaboration_links': _enrollment_collaboration(release),
         'processes': [_enroll_process(release, [refs[key] for key in ('REQ-ENROLL', *requirements)],
                                       [refs[key] for key in ('BR-UNIQUE', *rules)]),
                       _browse_process(refs['REQ-ENROLL']), _view_process(refs['REQ-ENROLL'])],

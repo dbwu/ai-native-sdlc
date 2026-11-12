@@ -2,6 +2,7 @@
 from .db import connect
 from .design_diagrams import _mermaid_label
 from .project_baselines import _diff, _with_source_names
+from .project_architecture_views import project_collaboration_diagram
 from .project_model import (
     CHANGE_LABELS, ProjectModel, _activity_diagram, _sequence_diagram,
     architecture_diagram, edge_identity, marked_label, process_owners,
@@ -173,7 +174,7 @@ def build_comparison(before_row, after_row, kind, process_key=None, scenario_key
                         'scenarios': [{'key': scene.key, 'name': scene.name}
                                       for scene in {**old_scenes, **new_scenes}.values()]})
 
-    if kind == 'architecture':
+    if kind in {'architecture', 'collaboration'}:
         process_key = scenario_key = None
     else:
         if process_key and process_key not in old_processes and process_key not in new_processes:
@@ -206,6 +207,13 @@ def build_comparison(before_row, after_row, kind, process_key=None, scenario_key
         left = architecture_diagram(before) if before else None
         right = architecture_diagram(after)
         overlay = _architecture_overlay(before, after, changes)
+    elif kind == 'collaboration':
+        changes = [row for row in all_changes if row['subject']['kind'] in {'architecture_port', 'project_collaboration'}]
+        left = project_collaboration_diagram(before) if before else None
+        right = project_collaboration_diagram(after)
+        overlay = project_collaboration_diagram(after, before=before, changes=all_changes)
+        if before and not left:
+            notice = '旧版没有记录项目协作关系。新增标记表示本版首次记录的内容。'
     else:
         old, new = old_processes.get(process_key), new_processes.get(process_key)
         old_owners = process_owners(before, old) if old else {}

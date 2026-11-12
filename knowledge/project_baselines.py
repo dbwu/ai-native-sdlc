@@ -10,6 +10,7 @@ from pydantic import Field
 from .db import connect
 from .models import EntityCreate, Kind, RelationType, StrictModel, Text
 from .operations import KnowledgeOperations
+from .project_architecture_views import logical_structure_diagram, project_collaboration_diagram
 from .project_model import ProjectModel, architecture_diagram, edge_identity as _edge_identity, process_diagrams
 from .requirement_deliveries import _text
 from .semantics import KnowledgeError, validate_types
@@ -136,6 +137,19 @@ def _diff(before, after, *, before_version=None, after_version=None):
         return {_edge_identity(link): link for link in model.get('dependencies', [])}
 
     compare('模块依赖', dependencies(before), dependencies(after), dependency, subject_kind='dependency')
+
+    def ports(model):
+        return {item['key']: item for item in model.get('architecture_ports', [])}
+
+    def collaboration(link, model):
+        names = {item['key']: item['name'] for item in [*model['nodes'], *ports(model).values()]}
+        return f'{names[link["source"]]} → {names[link["target"]]}', link['label']
+
+    compare('接口与数据对象', ports(before), ports(after),
+            lambda item, _: (item['name'], f'知识 v{item["knowledge"]["version"]}'), subject_kind='architecture_port')
+    compare('项目协作', {item['key']: item for item in before.get('collaboration_links', [])},
+            {item['key']: item for item in after.get('collaboration_links', [])},
+            collaboration, subject_kind='project_collaboration')
     old_processes = {row['key']: row for row in before.get('processes', [])}
     new_processes = {row['key']: row for row in after['processes']}
     compare('业务流程', {key: {'name': item['name'], 'description': item['description']} for key, item in old_processes.items()},
@@ -258,6 +272,9 @@ class ProjectBaselines:
                 validate_types(RelationType.CONTAINS, node_kinds[node.parent_key], node_kinds[node.key])
         for link in model.dependencies:
             validate_types(RelationType.DEPENDS_ON, node_kinds[link.source], node_kinds[link.target])
+        for port in model.architecture_ports:
+            kind = Kind.INTERFACE if port.kind == 'interface' else Kind.DATA_MODEL
+            _entity_refs(conn, project_id, [port.knowledge], kind)
 
         source_refs = {}
         for process in model.processes:
@@ -297,13 +314,17 @@ class ProjectBaselines:
         baseline = {'version': version, 'proposal_id': row['proposal_id'], 'confirmed_at': row['recorded_at'],
                     'title': model.title, 'summary': model.summary, 'model': document['model'],
                     'node_versions': {node.key: node.entity_version for node in model.nodes},
-                    'architecture': architecture_diagram(model), 'changes': document['changes'],
+                    'architecture': architecture_diagram(model), 'logical_structure': logical_structure_diagram(model),
+                    'collaboration': project_collaboration_diagram(model), 'changes': document['changes'],
                     'processes': [{'key': process.key, 'name': process.name, 'description': process.description,
                                    **document['source_refs'][process.key], 'diagrams': process_diagrams(model, process)}
                                   for process in model.processes],
                     'download_url': f'/workbench/projects/{project_id}/project-model/markdown?version={version}'}
         reference = {'project_id': str(project_id), 'version': version, 'proposal_id': str(row['proposal_id'])}
         baseline['architecture']['baseline_ref'] = reference
+        baseline['logical_structure']['baseline_ref'] = reference
+        if baseline['collaboration']:
+            baseline['collaboration']['baseline_ref'] = reference
         for process in baseline['processes']:
             for diagram in process['diagrams']:
                 diagram['baseline_ref'] = reference
@@ -329,6 +350,13 @@ def baseline_markdown(baseline):
         return ['', '```mermaid', diagram['mermaid'], '```', '']
 
     lines.extend(diagram_block(baseline['architecture']))
+    if baseline.get('logical_structure'):
+        lines.extend(['## 逻辑结构总览', *diagram_block(baseline['logical_structure'])])
+    if baseline.get('collaboration'):
+        lines.extend(['## 接口与协作', *diagram_block(baseline['collaboration'])])
+        for link in baseline['model']['collaboration_links']:
+            lines.append(f'- {_text(link["label"])} · {_text(link["rationale"])}')
+        lines.append('')
     for process in baseline['processes']:
         lines.extend(['', f'## {_text(process["name"])}', '', _text(process['description'])])
         for field, label in (('requirement_refs', '需求'), ('rule_refs', '业务规则')):

@@ -1,6 +1,6 @@
 <script lang="ts">
 export interface DesignDiagram {
-  kind: 'sequence' | 'architecture' | 'collaboration' | 'use_case' | 'project_architecture' | 'activity'
+  kind: 'sequence' | 'architecture' | 'collaboration' | 'use_case' | 'project_architecture' | 'activity' | 'logical_structure' | 'project_collaboration'
   title: string
   mermaid?: string
   nodes: { id: string; label: string; kind?: string; detail?: string }[]
@@ -39,6 +39,7 @@ const edges = computed(() => props.diagram.edges.filter(edge => nodes.value.has(
 const diagramName = computed(() => ({
   sequence: '业务时序图', architecture: '职责图', collaboration: '协作图', use_case: '用例图',
   project_architecture: '项目架构图', activity: '跨模块泳道图',
+  logical_structure: '逻辑结构图', project_collaboration: '项目接口与协作',
 }[props.diagram.kind]))
 const architectureComponents = computed(() => {
   if (props.diagram.kind !== 'architecture') return []

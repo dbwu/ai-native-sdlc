@@ -38,6 +38,24 @@ class ArchitectureDependency(StrictModel):
     label: Label
 
 
+class ArchitecturePort(StrictModel):
+    key: Key
+    name: Label
+    kind: Literal['interface', 'data_model']
+    knowledge: EvidenceRef
+
+
+class ProjectCollaboration(StrictModel):
+    key: Key
+    source: Key
+    target: Key
+    type: Literal['calls', 'reads', 'writes', 'depends_on']
+    label: Label
+    rationale: Annotated[str, Field(min_length=1, max_length=4000)]
+    process_key: Key | None = None
+    scenario_keys: list[Key] = Field(default_factory=list, max_length=12)
+
+
 class ProcessParticipant(StrictModel):
     key: Key
     name: Label
@@ -156,6 +174,8 @@ class ProjectModel(RuntimeInput):
     nodes: list[ArchitectureNode] = Field(min_length=1, max_length=150)
     dependencies: list[ArchitectureDependency] = Field(default_factory=list, max_length=200)
     processes: list[BusinessProcess] = Field(default_factory=list, max_length=30)
+    architecture_ports: list[ArchitecturePort] = Field(default_factory=list, max_length=100)
+    collaboration_links: list[ProjectCollaboration] = Field(default_factory=list, max_length=200)
 
     @model_validator(mode='after')
     def consistent_baseline(self):
@@ -184,7 +204,27 @@ class ProjectModel(RuntimeInput):
                 raise ValueError('架构依赖必须连接不同的已定义模块')
         for process in self.processes:
             _validate_process(process, nodes)
+        self._validate_collaboration(modules)
         return self
+
+    def _validate_collaboration(self, modules):
+        _unique((port.key for port in self.architecture_ports), '接口和数据对象的标识不能重复')
+        _unique((link.key for link in self.collaboration_links), '协作关系稳定标识不能重复')
+        ports = {port.key: port.kind for port in self.architecture_ports}
+        if ports.keys() & {node.key for node in self.nodes}:
+            raise ValueError('接口和数据对象的标识不能与架构节点相同')
+        actions = modules | {key for key, kind in ports.items() if kind == 'interface'}
+        data_objects = {key for key, kind in ports.items() if kind == 'data_model'}
+        scenarios = {process.key: {scene.key for scene in process.scenarios} for process in self.processes}
+        for link in self.collaboration_links:
+            valid_targets = data_objects if link.type in {'reads', 'writes'} else actions
+            if link.source not in actions or link.target not in valid_targets or link.source == link.target:
+                raise ValueError('协作关系需连接不同的有效端点，读写指向数据对象，调用和依赖指向模块或接口')
+            _unique(link.scenario_keys, '同一协作关系不能重复引用时序场景')
+            if link.process_key and link.process_key not in scenarios:
+                raise ValueError('协作关系必须引用已定义的业务流程')
+            if set(link.scenario_keys) - scenarios.get(link.process_key, set()):
+                raise ValueError('协作关系只能引用所属业务流程中的时序场景')
 
 
 def edge_identity(item):
