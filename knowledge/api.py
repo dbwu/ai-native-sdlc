@@ -15,6 +15,7 @@ from pydantic import Field, ValidationError
 
 from .db import connect, database_url
 from .localization import LABELS, localize_validation_errors
+from .metamodel_registry import metamodel_registry
 from .models import (
     ATTRIBUTE_MODELS, EntityContent, EntityCreate, EntityStatus, EntityUpdate, Kind,
     RelationContent, RelationCreate, RelationStatus, RelationType, RelationUpdate,
@@ -22,6 +23,7 @@ from .models import (
 from .semantics import KnowledgeError, RULES
 from .platform_api import platform_router
 from .design_api import design_router
+from .extraction_api import extraction_router
 from .design_worker import design_lifespan
 from .workspace_api import workspace_router
 from .service import KnowledgeService
@@ -115,6 +117,11 @@ def create_app(url: str | None = None) -> FastAPI:
                     "已验证关系需要生效的事实或人工确认证据，关系来源也必须标记为事实或人工确认",
                     "已验证的 IMPLEMENTED_BY 需要匹配目标版本的代码证据；VERIFIED_BY 需要匹配目标版本且通过的测试执行证据"]}
 
+    @app.get("/metamodel/registry", tags=["系统与元模型"], summary="查询工程知识类型注册表",
+             description="按当前元模型版本查询已实现的类型、端点组合、状态迁移和证据规则。")
+    def get_metamodel_registry():
+        return metamodel_registry()
+
     @app.post("/entities", response_model=EntityView, status_code=201, tags=["知识实体"], summary="创建知识实体",
               description="创建稳定身份和第 1 个修订版本。创建 Project 时省略 project_id；其他实体必须指定所属项目。")
     def create_entity(body: EntityCreate):
@@ -188,6 +195,7 @@ def create_app(url: str | None = None) -> FastAPI:
     app.include_router(workbench_router(lambda: url or database_url()))
     app.include_router(platform_router(lambda: url or database_url()))
     app.include_router(design_router(lambda: url or database_url()))
+    app.include_router(extraction_router(lambda: url or database_url()))
     app.include_router(workspace_router(lambda: url or database_url()))
 
     @app.get("/", include_in_schema=False)

@@ -13,6 +13,7 @@ from .semantics import (
     ENTITY_TRANSITIONS, RELATION_TRANSITIONS, KnowledgeError,
     validate_transition, validate_types,
 )
+from .source_spans import SourceSpan, read_source_span
 
 
 class KnowledgeService:
@@ -94,6 +95,12 @@ class KnowledgeService:
     def _entity_revision(self, conn, identity, version, content):
         attributes = ATTRIBUTE_MODELS[Kind(identity["kind"])].model_validate(content.attributes)
         self._check_evidence(conn, identity["project_id"], content.evidence)
+        if identity["kind"] == Kind.EVIDENCE and "source_span" in attributes.extensions:
+            span = SourceSpan.model_validate(attributes.extensions["source_span"])
+            source = read_source_span(conn, identity["project_id"], span)
+            if (attributes.category != "document" or attributes.uri != source["uri"]
+                    or attributes.revision != source["external_revision"] or attributes.sha256 != span.sha256):
+                raise KnowledgeError("原文证据的类型、地址、版本和摘要须与引用的来源快照一致")
         if identity["kind"] == Kind.EVIDENCE and attributes.subject_id:
             subject = self._get(conn, "entity", attributes.subject_id, attributes.subject_version)
             if subject["project_id"] != identity["project_id"]:

@@ -2,9 +2,24 @@
 import { computed } from 'vue'
 import { flatten,fieldName,readable,relationshipTypes,kinds } from '../lib/display'
 import type { RecordData } from '../types'
+import ProjectModelChanges from './ProjectModelChanges.vue'
+import ExtractionReview from './ExtractionReview.vue'
 const props=defineProps<{diff:RecordData|null}>()
 const names=computed(()=>new Map((props.diff?.changes||[]).filter((c:RecordData)=>c.after?.name||c.before?.name).map((c:RecordData)=>[c.id,c.after?.name||c.before?.name])))
 function value(v:unknown):string{return typeof v==='string'?(relationshipTypes[v]||String(names.value.get(v)||readable(v))):readable(v)}
 const changes=computed(()=>(props.diff?.changes||[]).map((c:RecordData)=>{const old:RecordData={},next:RecordData={};for(const key of ['name','description','status','attributes','type','source_id','target_id','rationale','source_version','target_version','evidence','provenance']){if(c.before&&key in c.before)old[key]=c.before[key];if(c.after&&key in c.after)next[key]=c.after[key]}const before=flatten(old),after=flatten(next);return {...c,fields:[...new Set([...Object.keys(before),...Object.keys(after)])].filter(k=>JSON.stringify(before[k])!==JSON.stringify(after[k])).map(key=>({key,old:value(before[key]),next:value(after[key])}))}}))
 </script>
-<template><article v-for="c in changes" :key="c.id" class="diff-change"><h3>{{ c.after?.name || c.before?.name || relationshipTypes[c.after?.type] || '知识关系' }} · {{ kinds[c.kind]||'知识关系' }}</h3><p>{{ c.before ? `原基线 v${c.before.version}` : '新增知识，尚无旧版本' }} → 本次候选内容</p><div v-for="field in c.fields" :key="field.key" class="diff-field"><strong>{{ fieldName(field.key) }}</strong><div class="diff-values"><div class="diff-value before"><details v-if="field.old.length>350"><summary>展开原内容</summary><pre>{{ field.old }}</pre></details><span v-else>{{ field.old }}</span></div><div class="diff-value after"><details v-if="field.next.length>350"><summary>展开候选内容</summary><pre>{{ field.next }}</pre></details><span v-else>{{ field.next }}</span></div></div></div><details><summary>高级详情：原始版本与候选 JSON</summary><pre>{{ JSON.stringify({before:c.before,after:c.after},null,2) }}</pre></details></article></template>
+<template>
+  <section v-if="diff?.extraction_review" class="project-model-review" aria-label="已保存的增量审阅记录">
+    <ExtractionReview :report="diff.extraction_review" :project-id="diff.project_id || ''" readonly/>
+  </section>
+  <section v-if="diff?.project_model_changes?.length" class="project-model-review" aria-label="项目基线变更">
+    <h3>项目基线变更</h3>
+    <ProjectModelChanges :changes="diff.project_model_changes"/>
+  </section>
+  <article v-for="c in changes" :key="c.id" class="diff-change"><h3>{{ c.after?.name || c.before?.name || relationshipTypes[c.after?.type] || '知识关系' }} · {{ kinds[c.kind]||'知识关系' }}</h3><p>{{ c.before ? `原基线 v${c.before.version}` : '新增知识，尚无旧版本' }} → 本次候选内容</p><div v-for="field in c.fields" :key="field.key" class="diff-field"><strong>{{ fieldName(field.key) }}</strong><div class="diff-values"><div class="diff-value before"><details v-if="field.old.length>350"><summary>展开原内容</summary><pre>{{ field.old }}</pre></details><span v-else>{{ field.old }}</span></div><div class="diff-value after"><details v-if="field.next.length>350"><summary>展开候选内容</summary><pre>{{ field.next }}</pre></details><span v-else>{{ field.next }}</span></div></div></div><details><summary>高级详情：原始版本与候选 JSON</summary><pre>{{ JSON.stringify({before:c.before,after:c.after},null,2) }}</pre></details></article>
+</template>
+
+<style scoped>
+.project-model-review { margin-top: 14px; }
+</style>

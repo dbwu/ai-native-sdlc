@@ -18,7 +18,7 @@ const executionProfiles = { python: 'python_unittest', c: 'c_native', cpp: 'cpp_
 const profileLabels: Record<string, string> = {
   python_unittest: 'Python unittest', c_native: 'C 编译与测试', cpp_native: 'C++ 编译与测试', java_native: 'Java 编译与测试',
 }
-const form = reactive({ name: '', design: '', language: 'python' as WorkspaceLanguage })
+const form = reactive({ name: '', design: '', language: 'python' as WorkspaceLanguage, sourceSnapshot: '' })
 const files = ref<{path: string; content: string}[]>([])
 const labels: Record<string, string> = {
   RUNNING: '执行中', SUCCEEDED: '执行通过', FAILED: '执行失败', COMPILE_FAILED: '编译失败', TEST_FAILED: '测试失败',
@@ -33,6 +33,7 @@ const currentExecutor = computed(() => executor.value.profiles?.[executionProfil
   ? { configured: false, available: false, message: executor.value.loadError }
   : executor.value))
 const snapshot = computed(() => detail.value?.latest_snapshot)
+const snapshotSources = computed(() => workspaces.value.filter(item => item.language === form.language && item.latest_snapshot_id))
 const controlsLocked = computed(() => busy.value || executing.value || codeBusy.value || loading.value)
 const canWrite = computed(() => !controlsLocked.value && !!actor.value.trim() && !!reason.value.trim())
 const activeExecution = computed(() => (detail.value?.executions || []).find((e: RecordData) => e.status === 'RUNNING'))
@@ -49,7 +50,9 @@ function setCodeBusy(value: boolean) { codeBusy.value = value; state.busy = valu
 
 function updateDetail(next: RecordData, resetFiles: boolean) {
   detail.value = next
-  workspaces.value = workspaces.value.map(w => w.id === next.workspace.id ? next.workspace : w)
+  workspaces.value = workspaces.value.map(w => w.id === next.workspace.id ? {
+    ...next.workspace, latest_snapshot_id: next.latest_snapshot?.id, latest_snapshot_version: next.latest_snapshot?.version,
+  } : w)
   if (resetFiles) restoreFiles()
   schedulePoll()
 }
@@ -94,6 +97,7 @@ async function loadProject() {
     ])
     if (token !== generation || project !== pid.value) return
     workspaces.value = items; designs.value = flows.filter(f => f.status === 'COMPLETED'); executor.value = configuration
+    if (!snapshotSources.value.some(item => item.latest_snapshot_id === form.sourceSnapshot)) form.sourceSnapshot = ''
     if (requestedDesign && designs.value.some(d => d.id === requestedDesign)) {
       form.design = requestedDesign
       selected.value = items.find(w => w.id === previousSelection && w.design_flow_id === requestedDesign)?.id
@@ -114,6 +118,8 @@ watch(() => [route.params.projectId, route.query.design, state.initialized, stat
   detail.value = null; files.value = []; void loadProject()
 }, { immediate: true })
 
+watch(() => form.language, () => { form.sourceSnapshot = '' })
+
 async function create() {
   if (controlsLocked.value) return
   busy.value = true; state.busy = true; error.value = ''
@@ -121,9 +127,12 @@ async function create() {
     const created = await request<RecordData>(`/engineering/projects/${pid.value}/workspaces`, {
       name: form.name.trim(), actor: actor.value.trim(), language: form.language,
       ...(form.design ? { design_flow_id: form.design } : {}),
+      ...(form.sourceSnapshot ? { source_snapshot_id: form.sourceSnapshot } : {}),
     })
     workspaces.value = [created, ...workspaces.value]; selected.value = created.id; showCreate.value = false
-    await loadDetail(created.id); notify('工程工作区已创建，目前为空，不代表已生成代码。', 'success')
+    await loadDetail(created.id)
+    notify(created.source_snapshot_id ? '已从所选快照建立工程工作区，可以生成本轮代码变更。' : '已创建空的工程工作区。', 'success')
+    form.sourceSnapshot = ''
   } catch (failure) { error.value = (failure as Error).message }
   finally { busy.value = false; state.busy = false }
 }
@@ -189,7 +198,7 @@ onBeforeUnmount(() => { ++generation; ++detailGeneration; stopPoll() })
         </dl>
       </div>
       <form v-if="showCreate" class="editor-box" @submit.prevent="create">
-        <h3>创建空工作区</h3>
+        <h3>创建工程工作区</h3>
         <label class="field">工作区名称<input v-model="form.name" required maxlength="200" :disabled="controlsLocked" placeholder="例如：选课系统工程"></label>
         <label class="field">代码语言
           <select v-model="form.language" :disabled="controlsLocked">
@@ -198,6 +207,15 @@ onBeforeUnmount(() => { ++generation; ++detailGeneration; stopPoll() })
           <small>语言在创建时确定。要为同一设计生成另一种语言的代码，请新建工作区。</small>
         </label>
         <label class="field">关联已确认设计（可选）<select v-model="form.design" :disabled="controlsLocked"><option value="">暂不关联</option><option v-for="item in designs" :key="item.id" :value="item.id">{{ item.title }}</option></select><small>仅列出当前项目已确认完成的设计流程。使用代码生成时请选择设计。</small></label>
+        <label class="field">代码起点
+          <select v-model="form.sourceSnapshot" :disabled="controlsLocked">
+            <option value="">从空工作区开始</option>
+            <option v-for="item in snapshotSources" :key="item.latest_snapshot_id" :value="item.latest_snapshot_id">
+              {{ item.name }} · 快照 v{{ item.latest_snapshot_version }}
+            </option>
+          </select>
+          <small>新增需求时，可沿用本项目同语言工作区的已保存快照，在新一轮设计上继续生成代码变更。</small>
+        </label>
         <label class="field">操作署名<input v-model="actor" required maxlength="100" :disabled="controlsLocked"></label>
         <div class="studio-actions"><button class="button primary" :disabled="controlsLocked || !form.name.trim() || !actor.trim()">创建工程工作区</button><RouterLink v-if="!loading && !designs.length" class="button secondary" :to="`/projects/${pid}/design`">去确认一份设计</RouterLink></div>
       </form>
@@ -209,6 +227,7 @@ onBeforeUnmount(() => { ++generation; ++detailGeneration; stopPoll() })
           <div class="studio-heading"><h2>{{ workspace.name }}</h2><span class="studio-badge">工作区 v{{ workspace.version }}</span></div>
           <p>设计来源 · {{ designTitle(workspace.design_flow_id) }}</p>
           <p>代码语言 · {{ languageLabel(workspaceLanguage) }}</p>
+          <p v-if="workspace.source_snapshot_id">继承的代码快照 <code>{{ workspace.source_snapshot_id }}</code></p>
           <div v-if="snapshot" class="info-box"><strong>当前文件快照 v{{ snapshot.version }}</strong><p class="studio-hash">{{ snapshot.sha256 }}</p><p>{{ snapshot.files?.length || 0 }} 个文件 · {{ dateTime(snapshot.recorded_at) }}</p></div>
           <p v-else class="info-box">尚无文件快照。请确认保存代码候选，或手工保存工程文件。</p>
           <label class="field">操作署名<input v-model="actor" required maxlength="100" :disabled="controlsLocked"></label>

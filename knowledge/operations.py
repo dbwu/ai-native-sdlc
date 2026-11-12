@@ -7,7 +7,7 @@ from psycopg.types.json import Jsonb
 from pydantic import ValidationError
 
 from .db import connect
-from .ingestion import parse_source
+from .ingestion import MAX_SOURCE_BYTES, parse_source
 from .localization import localize_validation_errors
 from .models import EntityCreate, EntityUpdate, RelationCreate, RelationType, RelationUpdate
 from .operations_models import IngestionRequest, ProposalCreate, ProposalReview
@@ -56,32 +56,52 @@ class KnowledgeOperations:
 
     def ingest(self, request: IngestionRequest):
         candidates = parse_source(request.format, request.content)
-        digest = hashlib.sha256(request.content.encode("utf-8")).hexdigest()
         with self._transaction() as conn:
-            KnowledgeService._lock(conn, request.project_id)
-            KnowledgeService._assert_project(conn, request.project_id)
-            source = conn.execute("SELECT * FROM knowledge_source WHERE project_id=%s AND uri=%s",
-                                  (request.project_id, request.source_uri)).fetchone()
-            if source is None:
-                source = {"id": uuid4()}
-                conn.execute("INSERT INTO knowledge_source (id,project_id,uri) VALUES (%s,%s,%s)",
-                             (source["id"], request.project_id, request.source_uri))
-            previous = conn.execute("SELECT * FROM source_revision WHERE source_id=%s AND external_revision=%s",
-                                    (source["id"], request.source_revision)).fetchone()
-            if previous:
-                if previous["sha256"] != digest or previous["format"] != request.format:
-                    raise KnowledgeError("同一来源版本不能对应不同内容或格式，请提供新的 source_revision", 409)
+            revision, replayed = self._save_source_revision(conn, request, request.format)
+            source_id, version = revision["source_id"], revision["version"]
+            if replayed:
                 proposal = conn.execute("SELECT id FROM change_proposal WHERE source_id=%s AND source_version=%s",
-                                        (source["id"], previous["version"])).fetchone()
+                                        (source_id, version)).fetchone()
                 return {"proposal": self._proposal(conn, proposal["id"]), "replayed": True}
-            version = conn.execute("SELECT coalesce(max(version),0)+1 AS v FROM source_revision WHERE source_id=%s",
-                                   (source["id"],)).fetchone()["v"]
-            conn.execute("""INSERT INTO source_revision
-                (source_id,version,external_revision,format,sha256,content,actor) VALUES (%s,%s,%s,%s,%s,%s,%s)""",
-                (source["id"], version, request.source_revision, request.format, digest, request.content, request.actor))
-            plan = self._source_plan(conn, source["id"], request, candidates)
-            proposal = self._create(conn, request.project_id, request.title, request.actor, plan, source["id"], version)
+            plan = self._source_plan(conn, source_id, request, candidates)
+            proposal = self._create(conn, request.project_id, request.title, request.actor, plan, source_id, version)
             return {"proposal": proposal, "replayed": False}
+
+    def register_source_snapshot(self, request):
+        with self._transaction() as conn:
+            row, replayed = self._save_source_revision(conn, request, "text")
+            return {key: value for key, value in row.items() if key != "content"} | {"replayed": replayed}
+
+    @staticmethod
+    def _save_source_revision(conn, request, source_format):
+        try:
+            raw = request.content.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise KnowledgeError("来源内容包含无效的 Unicode 字符") from exc
+        if len(raw) > MAX_SOURCE_BYTES or "\x00" in request.content:
+            raise KnowledgeError("来源原文须为无 NUL 的 UTF-8 文本，最多 1 MiB")
+        digest = hashlib.sha256(raw).hexdigest()
+        KnowledgeService._lock(conn, request.project_id)
+        KnowledgeService._assert_project(conn, request.project_id)
+        source = conn.execute("SELECT id FROM knowledge_source WHERE project_id=%s AND uri=%s",
+                              (request.project_id, request.source_uri)).fetchone()
+        if source is None:
+            source = {"id": uuid4()}
+            conn.execute("INSERT INTO knowledge_source (id,project_id,uri) VALUES (%s,%s,%s)",
+                         (source["id"], request.project_id, request.source_uri))
+        previous = conn.execute("SELECT * FROM source_revision WHERE source_id=%s AND external_revision=%s",
+                                (source["id"], request.source_revision)).fetchone()
+        if previous is not None:
+            if previous["sha256"] != digest or previous["format"] != source_format:
+                raise KnowledgeError("同一来源版本不能对应不同内容或格式，请提供新的 source_revision", 409)
+            return previous, True
+        version = conn.execute("SELECT coalesce(max(version),0)+1 AS v FROM source_revision WHERE source_id=%s",
+                               (source["id"],)).fetchone()["v"]
+        row = conn.execute("""INSERT INTO source_revision
+            (source_id,version,external_revision,format,sha256,content,actor) VALUES (%s,%s,%s,%s,%s,%s,%s)
+            RETURNING *""", (source["id"], version, request.source_revision, source_format, digest,
+                              request.content, request.actor)).fetchone()
+        return row, False
 
     def _source_plan(self, conn, source_id, request, candidates):
         bindings = {row["external_key"]: row["entity_id"] for row in conn.execute(
@@ -166,6 +186,38 @@ class KnowledgeOperations:
             if latest != proposal["source_version"]:
                 raise KnowledgeError("来源已有更新快照，请基于最新来源版本生成提案", 409)
         plan = proposal["plan"]
+        extraction = plan.get("extraction")
+        binding_source = proposal['source_id']
+        if extraction:
+            if guard := extraction.get('project_state_token'):
+                from .extraction_context import project_state_token
+                if project_state_token(conn, proposal['project_id']) != guard:
+                    raise KnowledgeError('知识或项目基线已变化，请重新抽取并审阅增量及影响；不会沿用过期决定', 409)
+            binding_source = UUID(extraction['source_id'])
+            row = conn.execute('''SELECT r.version,r.sha256 FROM source_revision r JOIN knowledge_source s ON s.id=r.source_id
+                WHERE s.project_id=%s AND s.id=%s ORDER BY r.version DESC LIMIT 1''',
+                (proposal['project_id'], binding_source)).fetchone()
+            if row is None or row['version'] != extraction['source_version'] or row['sha256'] != extraction['source_sha256']:
+                raise KnowledgeError('抽取原文已更新，请基于最新原文重新抽取和审阅', 409)
+            # 与知识写入处于同一事务，防止两个来源提案互相覆盖稳定键绑定。
+            for mapping in plan['entity_mapping']:
+                rows = conn.execute('''SELECT external_key,entity_id FROM source_entity_binding
+                    WHERE source_id=%s AND (external_key=%s OR entity_id=%s)''',
+                    (binding_source, mapping['key'], UUID(mapping['entity_id']))).fetchall()
+                if any(row['external_key'] != mapping['key'] or str(row['entity_id']) != mapping['entity_id'] for row in rows):
+                    raise KnowledgeError('来源知识稳定键的绑定已变化，请重新抽取和审阅', 409)
+            for mapping in extraction['relationship_mapping']:
+                rows = conn.execute('''SELECT external_key,relationship_id FROM source_relationship_binding
+                    WHERE source_id=%s AND (external_key=%s OR relationship_id=%s)''',
+                    (binding_source, mapping['key'], UUID(mapping['relationship_id']))).fetchall()
+                if any(row['external_key'] != mapping['key'] or str(row['relationship_id']) != mapping['relationship_id'] for row in rows):
+                    raise KnowledgeError('来源关系稳定键的绑定已变化，请重新抽取和审阅', 409)
+        project_model = plan.get("project_model")
+        if project_model:
+            latest = conn.execute("SELECT coalesce(max(version), 0) AS version FROM project_model_revision WHERE project_id=%s",
+                                  (proposal["project_id"],)).fetchone()["version"]
+            if latest + 1 != project_model["version"]:
+                raise KnowledgeError("项目基线已更新，请刷新并在最新版上重新提交", 409)
         for baseline in plan["baselines"]:
             current = KnowledgeService._get(conn, baseline["table"], UUID(baseline["id"]))
             if current["version"] != baseline["version"]:
@@ -185,16 +237,24 @@ class KnowledgeOperations:
             if record["project_id"] != proposal["project_id"]:
                 raise KnowledgeError("提案不能修改其他项目的知识")
             result.append({"op": operation["op"], "id": str(record["id"]), "version": record["version"]})
-        if proposal["source_id"]:
+        if binding_source:
             for mapping in plan["entity_mapping"]:
                 existing = conn.execute("SELECT entity_id FROM source_entity_binding WHERE source_id=%s AND external_key=%s",
-                                        (proposal["source_id"], mapping["key"])).fetchone()
+                                        (binding_source, mapping["key"])).fetchone()
                 if existing is None:
                     conn.execute("""INSERT INTO source_entity_binding
                         (source_id,project_id,external_key,entity_id) VALUES (%s,%s,%s,%s)""",
-                        (proposal["source_id"], proposal["project_id"], mapping["key"], UUID(mapping["entity_id"])))
+                        (binding_source, proposal["project_id"], mapping["key"], UUID(mapping["entity_id"])))
                 elif str(existing["entity_id"]) != mapping["entity_id"]:
                     raise KnowledgeError("来源键的稳定实体映射发生冲突", 409)
+        if extraction:
+            for mapping in extraction['relationship_mapping']:
+                conn.execute('''INSERT INTO source_relationship_binding(source_id,project_id,external_key,relationship_id)
+                    VALUES (%s,%s,%s,%s) ON CONFLICT (source_id,external_key) DO NOTHING''',
+                    (binding_source, proposal['project_id'], mapping['key'], UUID(mapping['relationship_id'])))
+        if project_model:
+            conn.execute("INSERT INTO project_model_revision (project_id,version,proposal_id,document) VALUES (%s,%s,%s,%s)",
+                         (proposal["project_id"], project_model["version"], proposal["id"], Jsonb(project_model)))
         return {"operations": result, "operation_count": len(result), "entity_mapping": plan["entity_mapping"]}
 
     def _preview(self, conn, proposal):

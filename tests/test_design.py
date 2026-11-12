@@ -13,6 +13,7 @@ from knowledge import model_gateway
 from knowledge.db import connect
 from knowledge.design import DesignService, sha256
 from knowledge.semantics import KnowledgeError
+from test_generic_workflow import approve
 
 pytestmark = pytest.mark.integration
 
@@ -99,6 +100,7 @@ def test_requirement_only_design_is_not_published_until_explicit_review(client, 
     current = generate(client, db_url, action(client, current, 'start'))
     assert current['flow']['status'] == 'REVIEW_PENDING'
     assert current['proposal']['status'] == 'pending' and len(fake_model) == 1
+    assert 'project_baseline' not in fake_model[0]
     assert current['jobs'][0]['trace']['context_sha256'] == sha256(fake_model[0])
     url = f"/entities?project_id={project['id']}"
     assert len(client.get(url).json()) == 2  # 只有项目和原需求。
@@ -119,6 +121,36 @@ def test_requirement_only_design_is_not_published_until_explicit_review(client, 
     relations = client.get(f"/relationships?project_id={project['id']}").json()
     assert relations and all(item['status'] == 'proposed' for item in relations)
     assert all(item['attributes']['category'] == 'analysis' for item in records if item['kind'] == 'Evidence')
+
+
+def test_new_requirement_design_reads_only_the_project_baseline_pinned_at_creation(
+        client, db_url, project, requirement, fake_model):
+    path = f'/workbench/projects/{project["id"]}/project-model'
+    model = {'title': '基础选课', 'nodes': [
+        {'key': 'Course', 'name': '选课领域', 'kind': 'domain'},
+        {'key': 'Enrollment', 'name': '选课办理', 'kind': 'module', 'parent_key': 'Course'},
+    ]}
+
+    def publish(expected_version):
+        response = client.post(path, json={'expected_version': expected_version, 'actor': '基线审阅者', 'model': model})
+        assert response.status_code == 201, response.text
+        approve(client, response.json())
+
+    publish(0)
+    first = create(client, project, requirement)
+    assert first['flow']['definition']['project_model_version'] == 1
+    model['nodes'].append({'key': 'Limit', 'name': '数量限制', 'kind': 'module', 'parent_key': 'Enrollment'})
+    publish(1)
+    second = create(client, project, requirement)
+    assert second['flow']['definition']['project_model_version'] == 2
+
+    first = generate(client, db_url, action(client, first, 'start'))
+    assert first['flow']['status'] == 'REVIEW_PENDING'
+    reference = fake_model[0]['project_baseline']
+    assert reference['version'] == 1
+    assert [node['key'] for node in reference['model']['nodes']] == ['Course', 'Enrollment']
+    assert first['jobs'][0]['trace']['context_sha256'] == sha256(fake_model[0])
+    assert client.get(path).json()['baseline']['version'] == 2
 
 
 @pytest.mark.parametrize('outcome', ['success', 'truncated', 'timeout'])

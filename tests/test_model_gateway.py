@@ -68,6 +68,30 @@ def test_public_configuration_contains_no_secret(configured):
     gateway.ensure_model_configured()
 
 
+def test_extraction_uses_existing_gateway_and_preserves_redacted_exchange(configured, monkeypatch):
+    from knowledge.extraction_models import ExtractionCandidate
+    document = {'summary': '无需新增知识', 'entities': [], 'relationships': [], 'warnings': []}
+    calls = install_transport(monkeypatch, response(document))
+    exchanges = []
+    result = gateway.complete_extraction({'source': {'content': '待分析原文'}, 'guidance': 'synthetic-secret-never-real'},
+        ExtractionCandidate.model_json_schema(), on_exchange=exchanges.append)
+    assert result['document'] == document
+    assert result['trace']['prompt_version'] == gateway.EXTRACTION_PROMPT_VERSION
+    prompt = json.loads(calls[0][0].data)['messages'][0]['content']
+    assert '待分析数据' in prompt and '否定、例外、前提' in prompt
+    assert len(exchanges) == 2 and exchanges[0]['response'] is None
+    assert exchanges[1]['response']['finish_reason'] == 'stop'
+    assert 'synthetic-secret-never-real' not in json.dumps(exchanges)
+
+
+def test_extraction_invalid_json_keeps_original_response(configured, monkeypatch):
+    install_transport(monkeypatch, {'choices': [{'finish_reason': 'stop', 'message': {'content': '无效 JSON 答复'}}]})
+    exchanges = []
+    with pytest.raises(KnowledgeError, match='知识抽取 JSON'):
+        gateway.complete_extraction({}, {}, on_exchange=exchanges.append)
+    assert exchanges[-1]['response']['content'] == '无效 JSON 答复'
+
+
 @pytest.mark.parametrize("url", ["file:///tmp/key", "https://user:password@model.example/v1",
                                  "https://model.example/v1?api_key=private", "http://model.example/#secret",
                                  "https://model.example:bad/v1", "https://model.example/\nkey"])
@@ -190,8 +214,8 @@ def test_model_can_return_structured_business_diagrams(configured, monkeypatch, 
     assert "已绑定的需求及验收条件、设计依据和已保存澄清答复" in prompt
     assert "归属关系不等于调用" in prompt
     parsed = model.model_validate(result["document"])
-    assert parsed.sequence_diagrams[0].model_dump() == sequence
-    assert parsed.use_case_diagrams[0].model_dump() == use_case
+    assert parsed.sequence_diagrams[0].model_dump(exclude_none=True) == sequence
+    assert parsed.use_case_diagrams[0].model_dump(exclude_none=True) == use_case
     previous = model.model_validate(design)
     assert previous.sequence_diagrams == [] and previous.use_case_diagrams == [] and previous.collaboration_links == []
 
@@ -236,7 +260,7 @@ def test_model_can_propose_capacity_collaborations(configured, monkeypatch, conf
     schema = json.loads(request["messages"][1]["content"])["output_schema"]
     assert schema["properties"]["collaboration_links"]["maxItems"] == 50
     parsed = model.model_validate(result["document"])
-    assert [link.model_dump() for link in parsed.collaboration_links] == capacity_design["collaboration_links"]
+    assert [link.model_dump(exclude_none=True) for link in parsed.collaboration_links] == capacity_design["collaboration_links"]
 
 
 @pytest.mark.parametrize("scenario,message", [

@@ -6,7 +6,8 @@ from fastapi import APIRouter, Query
 
 from .analysis import KnowledgeAnalysis
 from .operations import KnowledgeOperations
-from .operations_models import IngestionRequest, ProposalCreate, ProposalReview
+from .operations_models import IngestionRequest, ProposalCreate, ProposalReview, SourceEvidenceProposal, SourceSnapshotCreate
+from .source_evidence import SourceEvidenceService
 
 
 def operations_router(url_provider):
@@ -19,6 +20,18 @@ def operations_router(url_provider):
                  description="接收 JSON 或显式 knowledge-json Markdown 块；记录原文快照并生成提案，不写入正式知识。相同来源版本和内容重放返回原提案。")
     def ingest(body: IngestionRequest):
         return service().ingest(body)
+
+    @router.post("/source-snapshots", status_code=201, summary="登记普通文本或 Markdown 原文快照")
+    def register_source_snapshot(body: SourceSnapshotCreate):
+        return service().register_source_snapshot(body)
+
+    @router.post("/source-evidence/proposals", status_code=201, summary="提出实体或关系的原文证据关联")
+    def propose_source_evidence(body: SourceEvidenceProposal):
+        return SourceEvidenceService(url_provider()).propose(body)
+
+    @router.get("/projects/{project_id}/source-evidence", summary="读取指定知识版本的原文证据位置")
+    def source_evidence(project_id: UUID, table: Literal["entity", "relationship"], id: UUID, version: int = Query(ge=1)):
+        return SourceEvidenceService(url_provider()).read(project_id, table, id, version)
 
     @router.get("/sources", summary="查询项目的来源快照索引",
                 description="列出每个来源及其最新快照版本、外部版本和原文 SHA-256；系统不会抓取来源 URI。")

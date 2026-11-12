@@ -75,6 +75,7 @@ class CollaborationEndpoint(RuntimeInput):
 
 
 class CollaborationLink(RuntimeInput):
+    key: Key | None = Field(default=None, title="协作关系稳定标识，历史记录可为空")
     source: CollaborationEndpoint = Field(title="发起调用、读写或依赖的一方")
     target: CollaborationEndpoint = Field(title="被调用、读写或依赖的一方")
     type: Literal["calls", "reads", "writes", "depends_on"] = Field(title="协作关系类型")
@@ -106,12 +107,14 @@ class SequenceParticipant(RuntimeInput):
 
 
 class SequenceMessage(RuntimeInput):
+    key: Key | None = Field(default=None, title="消息稳定标识，改名或调整顺序时沿用")
     source: Key = Field(title="发送方标识")
     target: Key = Field(title="接收方标识")
     label: DiagramLabel = Field(title="单行交互说明")
 
 
 class SequenceDiagram(RuntimeInput):
+    key: Key | None = Field(default=None, title="时序场景稳定标识，历史记录可为空")
     title: DiagramLabel = Field(max_length=120, title="业务交互标题")
     requirement_ids: RequirementIds = Field(title="图所解释的需求标识")
     participants: list[SequenceParticipant] = Field(min_length=2, max_length=8, title="参与交互的角色、组件或外部系统")
@@ -122,6 +125,9 @@ class SequenceDiagram(RuntimeInput):
         keys = {participant.key for participant in self.participants}
         if len(keys) != len(self.participants):
             raise ValueError("同一时序图的参与者标识不能重复")
+        message_keys = [message.key for message in self.messages if message.key is not None]
+        if len(message_keys) != len(set(message_keys)):
+            raise ValueError("同一时序图的消息稳定标识不能重复")
         if any(message.source not in keys or message.target not in keys for message in self.messages):
             raise ValueError("时序图交互必须引用本图定义的参与者")
         if len(set(self.requirement_ids)) != len(self.requirement_ids):
@@ -135,11 +141,13 @@ class UseCaseNode(RuntimeInput):
 
 
 class UseCaseAssociation(RuntimeInput):
+    key: Key | None = Field(default=None, title="用例关联稳定标识，历史记录可为空")
     actor: Key = Field(title="参与者标识")
     use_case: Key = Field(title="用例标识")
 
 
 class UseCaseDiagram(RuntimeInput):
+    key: Key | None = Field(default=None, title="用例图稳定标识，历史记录可为空")
     title: DiagramLabel = Field(max_length=120, title="需求用例图标题")
     requirement_ids: RequirementIds = Field(title="图所解释的需求标识")
     actors: list[UseCaseNode] = Field(min_length=1, max_length=8, title="系统边界外的业务参与者")
@@ -155,6 +163,9 @@ class UseCaseDiagram(RuntimeInput):
         pairs = {(item.actor, item.use_case) for item in self.associations}
         if len(pairs) != len(self.associations):
             raise ValueError("同一用例图不能重复声明同一关联")
+        association_keys = [item.key for item in self.associations if item.key is not None]
+        if len(association_keys) != len(set(association_keys)):
+            raise ValueError("同一用例图的关联稳定标识不能重复")
         if any(actor not in actors or case not in cases for actor, case in pairs):
             raise ValueError("用例图关联必须引用本图的参与者和用例")
         if {actor for actor, _ in pairs} != actors or {case for _, case in pairs} != cases:
@@ -179,6 +190,10 @@ class DesignDocument(RuntimeInput):
 
     @model_validator(mode="after")
     def complete_and_consistent(self):
+        for items in (self.sequence_diagrams, self.use_case_diagrams, self.collaboration_links):
+            keys = [item.key for item in items if item.key is not None]
+            if len(keys) != len(set(keys)):
+                raise ValueError("同类图示或关系的稳定标识不能重复")
         groups = (self.components, self.interfaces, self.data_models, self.test_plan)
         if sum(map(len, groups)) > 50:
             raise ValueError("本里程碑最多生成50项设计知识")

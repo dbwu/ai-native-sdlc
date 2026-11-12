@@ -112,6 +112,10 @@ class DesignService:
                     baselines.append({'table': 'entity', 'id': str(ref.id), 'version': ref.version})
             flow_id = uuid4()
             definition = request.model_dump(mode='json')
+            baseline = conn.execute('SELECT max(version) AS version FROM project_model_revision WHERE project_id=%s',
+                                    (project_id,)).fetchone()
+            if baseline['version'] is not None:
+                definition['project_model_version'] = baseline['version']
             conn.execute('INSERT INTO design_flow(id,project_id,title,definition) VALUES (%s,%s,%s,%s)',
                          (flow_id, project_id, request.title, Jsonb(definition)))
             state = {'baselines': baselines, 'completed_stages': [], 'design_proposal_id': None,
@@ -140,7 +144,9 @@ class DesignService:
             history = conn.execute('SELECT * FROM design_flow_event WHERE flow_id=%s ORDER BY version DESC LIMIT 100', (flow_id,)).fetchall()
             return {'flow': flow, 'requirements': requirements, 'context': records(definition['input_knowledge']),
                     'design': state['design'], 'questions': state['questions'], 'answers': state['answers'],
-                    'diagrams': design_diagrams(state['design'], requirements=requirements),
+                    'diagrams': design_diagrams(state['design'], requirements=requirements, design_ref={
+                        'flow_id': str(flow['id']), 'flow_version': flow['version'],
+                        'proposal_id': state.get('design_proposal_id')}),
                     'assumptions': state['assumptions'], 'proposal': self._proposal(conn, state),
                     'jobs': jobs, 'history': history, 'model_config': model_gateway.public_model_config()}
 
@@ -284,6 +290,13 @@ class DesignService:
         context = {'title': flow['title'], 'goal': definition['goal'], 'requirements': records(definition['requirements']),
                    'knowledge': records(definition['input_knowledge']), 'clarifications': flow['state']['answers'],
                    'scope': '仅设计：形成可审阅的组件、接口、数据模型和测试计划；不生成代码，不声称执行或测试通过。'}
+        project_version = definition.get('project_model_version')
+        if project_version is not None:
+            baseline = conn.execute("""SELECT document->'model' AS model FROM project_model_revision
+                WHERE project_id=%s AND version=%s""", (flow['project_id'], project_version)).fetchone()
+            if baseline is None:
+                raise KnowledgeError('无法读取本轮固定的项目基线，请核对项目知识', 409)
+            context['project_baseline'] = {'version': project_version, 'model': baseline['model']}
         if confirmed_guidance is not None:
             context.update(generation_guidance=confirmed_guidance, pending_questions=flow['state']['questions'])
         if len(canonical(context).encode('utf-8')) > 512*1024:

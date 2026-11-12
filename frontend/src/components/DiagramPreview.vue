@@ -1,6 +1,6 @@
 <script lang="ts">
 export interface DesignDiagram {
-  kind: 'sequence' | 'architecture' | 'collaboration' | 'use_case'
+  kind: 'sequence' | 'architecture' | 'collaboration' | 'use_case' | 'project_architecture' | 'activity'
   title: string
   mermaid?: string
   nodes: { id: string; label: string; kind?: string; detail?: string }[]
@@ -25,17 +25,21 @@ function loadEngine() {
 import { computed, onBeforeUnmount, ref, useId, watch } from 'vue'
 import { kinds } from '../lib/display'
 
-const props = defineProps<{ diagram: DesignDiagram }>()
+const props = defineProps<{ diagram: DesignDiagram; compact?: boolean }>()
 const instance = useId()
 const imageUrl = ref('')
 const imageWidth = ref(400)
 const rendering = ref(false)
 const failed = ref(false)
+const fitWidth = ref(true)
 let generation = 0
 const nodes = computed(() => new Map(props.diagram.nodes.map(node => [node.id, node])))
 const labels = computed(() => new Map(props.diagram.nodes.map(node => [node.id, node.label])))
 const edges = computed(() => props.diagram.edges.filter(edge => nodes.value.has(edge.source) && nodes.value.has(edge.target)))
-const diagramName = computed(() => ({ sequence: '业务时序图', architecture: '职责图', collaboration: '协作图', use_case: '用例图' }[props.diagram.kind]))
+const diagramName = computed(() => ({
+  sequence: '业务时序图', architecture: '职责图', collaboration: '协作图', use_case: '用例图',
+  project_architecture: '项目架构图', activity: '跨模块泳道图',
+}[props.diagram.kind]))
 const architectureComponents = computed(() => {
   if (props.diagram.kind !== 'architecture') return []
   return props.diagram.nodes.filter(node => node.kind === 'ArchitectureComponent').map(component => {
@@ -105,6 +109,9 @@ onBeforeUnmount(() => { ++generation; clearImage() })
     <figcaption>
       <strong>{{ diagram.title }}</strong>
       <span v-if="diagram.title !== diagramName" class="diagram-kind">{{ diagramName }}</span>
+      <button v-if="compact && imageUrl" type="button" class="text-button diagram-size" @click="fitWidth = !fitWidth">
+        {{ fitWidth ? '按原尺寸查看' : '适应宽度' }}
+      </button>
     </figcaption>
     <p v-if="diagram.kind === 'architecture'" class="diagram-guide">
       <strong>怎么看这张图？</strong> 先找需求，再看哪个组件负责，最后看组件包含的接口和数据结构。连线表示分工或归属，处理先后可以看业务时序图。
@@ -112,8 +119,11 @@ onBeforeUnmount(() => { ++generation; clearImage() })
     <p v-else-if="diagram.kind === 'collaboration'" class="diagram-guide">
       <strong>怎么看这张图？</strong> 沿箭头看哪个组件或接口调用、读取、写入或依赖哪一方。关系清单列出每条关系的依据，交互先后可以看业务时序图。
     </p>
+    <p v-else-if="diagram.kind === 'project_architecture' && !compact" class="diagram-guide">沿箭头查看模块依赖，左侧的层级目录可逐级展开。</p>
+    <p v-else-if="diagram.kind === 'activity' && !compact" class="diagram-guide">每个泳道是一位参与者或一个负责模块。沿箭头查看步骤、条件分支和跨模块交接。</p>
     <p v-if="rendering" class="diagram-message" role="status">正在渲染图示…</p>
-    <div v-else-if="imageUrl" class="diagram-scroll" tabindex="0" role="region" :aria-label="`${diagram.title}图示区域`">
+    <div v-else-if="imageUrl" class="diagram-scroll" :class="{ fitted: compact && fitWidth }"
+      tabindex="0" role="region" :aria-label="`${diagram.title}图示区域`">
       <img :src="imageUrl" :width="imageWidth" :alt="`${diagramName}：${diagram.title}。可在图后查看文字说明。`" @error="imageFailed">
     </div>
     <p v-else class="diagram-message" role="status">{{ failed ? '图示暂时无法渲染，可查看文字说明。' : '本次记录没有 Mermaid 源码，可查看文字说明。' }}</p>
@@ -172,6 +182,8 @@ onBeforeUnmount(() => { ++generation; clearImage() })
 .diagram-guide { margin: 8px 0 12px; font-size: 13px; line-height: 1.6; }
 .diagram-scroll { max-width: 100%; max-height: 520px; overflow: auto; border: 1px solid var(--line); border-radius: 7px; background: #fff; }
 .diagram-scroll img { display: block; max-width: none; height: auto; margin-inline: auto; }
+.diagram-scroll.fitted img { max-width: 100%; }
+.diagram-size { margin-inline-start: auto; }
 .diagram-summary { margin-top: 14px; font-size: 13px; overflow-wrap: anywhere; }
 .diagram-summary h5 { margin: 0 0 6px; font-size: 13px; }
 .diagram-summary ul { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr)); gap: 8px; margin: 0; padding: 0; list-style: none; }

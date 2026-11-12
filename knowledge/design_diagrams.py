@@ -10,12 +10,18 @@ COLLABORATION_NODES = {
 COLLABORATION_LABELS = {'calls': '调用', 'reads': '读取', 'writes': '写入', 'depends_on': '依赖'}
 
 
-def design_diagrams(design, requirement_id=None, *, requirements=()):
+def design_diagrams(design, requirement_id=None, *, requirements=(), design_ref=None):
     if not design or design.get('questions'):
         return []
 
     def relevant(item):
         return requirement_id is None or str(requirement_id) in item['requirement_ids']
+
+    requirements = [item for item in requirements if requirement_id is None or str(item['id']) == str(requirement_id)]
+    fixed_requirements = {str(item['id']): {'id': str(item['id']), 'version': item['version']} for item in requirements}
+
+    def refs(item):
+        return [fixed_requirements[ref] for ref in item['requirement_ids'] if ref in fixed_requirements]
 
     diagrams = []
     for use_case in design.get('use_case_diagrams', []):
@@ -27,7 +33,17 @@ def design_diagrams(design, requirement_id=None, *, requirements=()):
         nodes.extend({'id': case_ids[item['key']], 'label': item['name'], 'kind': 'UseCase'} for item in use_case['use_cases'])
         edges = [{'source': actor_ids[item['actor']], 'target': case_ids[item['use_case']], 'label': '参与'}
                  for item in use_case['associations']]
-        diagrams.append({'kind': 'use_case', 'title': use_case['title'], 'nodes': nodes, 'edges': edges})
+        diagrams.append({'kind': 'use_case', 'title': use_case['title'], 'nodes': nodes, 'edges': edges,
+                         'model_refs': {'identity_scope': 'design_snapshot', 'diagram_key': use_case.get('key'),
+                                        'requirement_refs': refs(use_case),
+                                        'nodes': {**{actor_ids[item['key']]: {'kind': 'actor', 'key': item['key']}
+                                                     for item in use_case['actors']},
+                                                  **{case_ids[item['key']]: {'kind': 'use_case', 'key': item['key']}
+                                                     for item in use_case['use_cases']}},
+                                        'edges': [{'kind': 'association', 'key': item.get('key'),
+                                                   'actor_key': item['actor'], 'use_case_key': item['use_case'],
+                                                   'identity': 'stable_key' if item.get('key') else 'endpoint_pair'}
+                                                  for item in use_case['associations']]}})
 
     for sequence in design.get('sequence_diagrams', []):
         if not relevant(sequence):
@@ -37,9 +53,18 @@ def design_diagrams(design, requirement_id=None, *, requirements=()):
                  for participant in sequence['participants']]
         edges = [{'source': actor_ids[message['source']], 'target': actor_ids[message['target']], 'label': message['label']}
                  for message in sequence['messages']]
-        diagrams.append({'kind': 'sequence', 'title': sequence['title'], 'nodes': nodes, 'edges': edges})
+        diagrams.append({'kind': 'sequence', 'title': sequence['title'], 'nodes': nodes, 'edges': edges,
+                         'model_refs': {'identity_scope': 'design_snapshot', 'diagram_key': sequence.get('key'),
+                                        'requirement_refs': refs(sequence),
+                                        'identity_complete': bool(sequence.get('key')) and all(
+                                            message.get('key') for message in sequence['messages']),
+                                        'nodes': {actor_ids[item['key']]: {'kind': 'participant', 'key': item['key']}
+                                                  for item in sequence['participants']},
+                                        'edges': [{'kind': 'message', 'key': item.get('key'), 'position': index,
+                                                   'source_key': item['source'], 'target_key': item['target'],
+                                                   'identity': 'stable_key' if item.get('key') else 'legacy_scenario'}
+                                                  for index, item in enumerate(sequence['messages'])]}})
 
-    requirements = [item for item in requirements if requirement_id is None or str(item['id']) == str(requirement_id)]
     architecture = _architecture(design, relevant, requirements)
     if architecture:
         diagrams.append(architecture)
@@ -48,6 +73,8 @@ def design_diagrams(design, requirement_id=None, *, requirements=()):
         diagrams.append(collaboration)
     for diagram in diagrams:
         diagram['mermaid'] = '\n'.join(mermaid_lines(diagram))
+        if design_ref is not None:
+            diagram['design_ref'] = dict(design_ref)
     return diagrams
 
 
@@ -61,19 +88,23 @@ def _architecture(design, relevant, requirements):
     if not components:
         return None
 
-    nodes, edges = [], []
+    nodes, edges, node_refs, edge_refs = [], [], {}, []
 
-    def add_node(kind, label, **attributes):
+    def add_node(kind, label, *, model_ref, **attributes):
         node_id = f'n{len(nodes) + 1}'
         nodes.append({'id': node_id, 'kind': kind, 'label': label, **attributes})
+        node_refs[node_id] = model_ref
         return node_id
 
-    requirement_nodes = {str(item['id']): add_node('Requirement', f'{item["name"]} · v{item["version"]}')
+    requirement_nodes = {str(item['id']): add_node('Requirement', f'{item["name"]} · v{item["version"]}',
+                                                 model_ref={'kind': 'requirement', 'entity_id': str(item['id']),
+                                                            'entity_version': item['version']})
                          for item in requirements}
     component_nodes = {}
     for component in components:
         key = component['key']
         node_id = add_node('ArchitectureComponent', component['name'],
+                           model_ref={'kind': 'component', 'key': key},
                            detail=component.get('responsibility') or component.get('description') or '')
         component_nodes[key] = node_id
         direct = set(component['requirement_ids'])
@@ -85,10 +116,16 @@ def _architecture(design, relevant, requirements):
             else:
                 continue
             edges.append({'source': source, 'target': node_id, 'label': label})
+            edge_refs.append({'kind': 'responsibility', 'requirement_id': requirement_id, 'component_key': key})
     for kind, child in children:
-        node_id = add_node(kind, child['name'])
+        node_id = add_node(kind, child['name'], model_ref={'kind': kind, 'key': child.get('key')})
         edges.append({'source': component_nodes[child['component_key']], 'target': node_id, 'label': '包含'})
-    return {'kind': 'architecture', 'title': '职责图', 'nodes': nodes, 'edges': edges}
+        edge_refs.append({'kind': 'containment', 'component_key': child['component_key'], 'child_kind': kind,
+                          'child_key': child.get('key')})
+    return {'kind': 'architecture', 'title': '职责图', 'nodes': nodes, 'edges': edges,
+            'model_refs': {'identity_scope': 'design_snapshot', 'diagram_key': 'responsibility',
+                           'nodes': node_refs, 'edges': edge_refs,
+                           'requirement_refs': [{'id': str(item['id']), 'version': item['version']} for item in requirements]}}
 
 
 def _collaboration(design, relevant, requirements):
@@ -97,13 +134,14 @@ def _collaboration(design, relevant, requirements):
         return None
     labels = {str(item['id']): f'{item["name"]} · v{item["version"]}' for item in requirements}
     used = {(endpoint['kind'], endpoint['key']) for link in links for endpoint in (link['source'], link['target'])}
-    nodes, ids = [], {}
+    nodes, ids, node_refs = [], {}, {}
     for kind, (group, entity_kind) in COLLABORATION_NODES.items():
         for item in design[group]:
             ref = (kind, item['key'])
             if ref in used:
                 node_id = f'n{len(nodes) + 1}'
                 ids[ref] = node_id
+                node_refs[node_id] = {'kind': kind, 'key': item['key']}
                 nodes.append({'id': node_id, 'kind': entity_kind, 'label': item['name']})
     edges = []
     for link in links:
@@ -111,7 +149,13 @@ def _collaboration(design, relevant, requirements):
         edges.append({'source': ids[(source['kind'], source['key'])], 'target': ids[(target['kind'], target['key'])],
                       'label': COLLABORATION_LABELS[link['type']], 'rationale': link['rationale'],
                       'requirements': [labels[ref] for ref in link['requirement_ids'] if ref in labels]})
-    return {'kind': 'collaboration', 'title': '协作图', 'nodes': nodes, 'edges': edges}
+    return {'kind': 'collaboration', 'title': '协作图', 'nodes': nodes, 'edges': edges,
+            'model_refs': {'identity_scope': 'design_snapshot', 'diagram_key': 'collaboration',
+                           'nodes': node_refs,
+                           'edges': [{'kind': 'collaboration', 'key': link.get('key'), 'type': link['type'],
+                                      'source': link['source'], 'target': link['target'],
+                                      'identity': 'stable_key' if link.get('key') else 'typed_endpoints'} for link in links],
+                           'requirement_refs': [{'id': str(item['id']), 'version': item['version']} for item in requirements]}}
 
 
 # 只生成固定 Mermaid 语法。标签内替换控制字符和分隔符，模型无法注入语句、链接或 HTML。

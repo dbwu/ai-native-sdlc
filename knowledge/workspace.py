@@ -41,6 +41,7 @@ class WorkspaceCreate(RuntimeInput):
     actor: Text = Field(title='操作署名')
     design_flow_id: UUID | None = Field(default=None, title='已确认设计流程')
     language: WorkspaceLanguage = Field(default='python', title='代码生成语言')
+    source_snapshot_id: UUID | None = Field(default=None, title='同项目同语言的已保存代码快照')
 
 
 class WorkspaceFile(RuntimeInput):
@@ -408,10 +409,24 @@ class WorkspaceService:
                     raise KnowledgeError('设计流程不属于当前项目', 404)
                 if flow['status'] != 'COMPLETED':
                     raise KnowledgeError('请先明确确认设计流程，再建立关联工程工作区', 409)
+            source = None
+            if request.source_snapshot_id:
+                source = conn.execute('''SELECT s.files,s.version,w.name,w.language
+                    FROM engineering_snapshot s JOIN engineering_workspace w ON w.id=s.workspace_id
+                    WHERE s.id=%s AND w.project_id=%s''', (request.source_snapshot_id, project_id)).fetchone()
+                if source is None:
+                    raise KnowledgeError('未找到当前项目的指定来源快照', 404)
+                if source['language'] != request.language:
+                    raise KnowledgeError('来源快照必须与新工作区使用相同代码语言', 409)
             workspace_id = uuid4()
-            conn.execute('INSERT INTO engineering_workspace(id,project_id,design_flow_id,name,actor,language) VALUES(%s,%s,%s,%s,%s,%s)',
-                         (workspace_id, project_id, request.design_flow_id, request.name, request.actor, request.language))
+            conn.execute('''INSERT INTO engineering_workspace(id,project_id,design_flow_id,name,actor,language,source_snapshot_id)
+                VALUES(%s,%s,%s,%s,%s,%s,%s)''', (workspace_id, project_id, request.design_flow_id, request.name, request.actor,
+                                                   request.language, request.source_snapshot_id))
             self._event(conn, {'id': workspace_id}, 'created', request.actor, '明确建立工程工作区；尚未生成或执行代码')
+            if source:
+                workspace = self._workspace(conn, workspace_id)
+                self._save_snapshot(conn, workspace, source['files'], request.actor,
+                                    f'从工作区「{source["name"]}」的快照 v{source["version"]} 建立代码基线')
             return self._workspace(conn, workspace_id)
 
     def list(self, project_id):
@@ -419,7 +434,10 @@ class WorkspaceService:
             project = KS._get(conn, 'entity', project_id)
             if project['kind'] != 'Project':
                 raise KnowledgeError('未找到项目', 404)
-            return conn.execute('SELECT * FROM current_engineering_workspaces WHERE project_id=%s ORDER BY created_at DESC,id LIMIT 200', (project_id,)).fetchall()
+            return conn.execute('''SELECT w.*,s.id AS latest_snapshot_id,s.version AS latest_snapshot_version
+                FROM current_engineering_workspaces w LEFT JOIN LATERAL (
+                    SELECT id,version FROM engineering_snapshot WHERE workspace_id=w.id ORDER BY version DESC LIMIT 1
+                ) s ON true WHERE w.project_id=%s ORDER BY w.created_at DESC,w.id LIMIT 200''', (project_id,)).fetchall()
 
     def _detail(self, conn, workspace_id):
         workspace = self._workspace(conn, workspace_id)

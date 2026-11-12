@@ -6,6 +6,8 @@ import { state, selectProject, notify } from '../store/workbench'
 import { fieldName, kinds, readable, relationshipTypes } from '../lib/display'
 import type { RecordData } from '../types'
 import ProjectDesignDiagrams from '../components/ProjectDesignDiagrams.vue'
+import ProjectModelWorkbench from '../components/ProjectModelWorkbench.vue'
+import SourceEvidence from '../components/SourceEvidence.vue'
 import StatusPill from '../components/StatusPill.vue'
 import RequirementDeliveries from '../components/RequirementDeliveries.vue'
 
@@ -134,7 +136,7 @@ watch(() => [pid.value, state.initialized], async () => {
   }
 }, { immediate: true })
 
-watch(() => [pid.value, entityId.value], async () => {
+watch(() => [pid.value, entityId.value, entityId.value ? versionQuery.value : '', deliveryRefresh.value], async () => {
   const token = ++entityRead
   selectedEntity.value = null
   entityError.value = ''
@@ -143,7 +145,8 @@ watch(() => [pid.value, entityId.value], async () => {
   const project = pid.value
   entityLoading.value = true
   try {
-    const item = await request<RecordData>('/entities/' + encodeURIComponent(entityId.value))
+    const version = versionQuery.value ? '?' + new URLSearchParams({ version: versionQuery.value }) : ''
+    const item = await request<RecordData>('/entities/' + encodeURIComponent(entityId.value) + version)
     if (token !== entityRead) return
     if (item.project_id !== project) throw new Error('此知识不属于当前项目。')
     selectedEntity.value = item
@@ -283,13 +286,17 @@ async function check() {
 <template>
   <section class="panel project-panel">
     <h2>项目知识工作台</h2>
-    <p>从单条需求查看版本、本次设计产物和交付文档。知识创建与修订仍须提交提案审阅。</p>
+    <p>查看项目架构和主要业务流程，或从单条需求追溯设计产物与交付文档。知识创建与修订须提交提案审阅。</p>
     <div v-if="error" class="info-box error" role="alert">{{ error }}</div>
     <div class="inline-actions">
       <button type="button" class="button primary" @click="edit(null)">新建知识</button>
+      <RouterLink class="button primary" :to="`/projects/${pid}/knowledge/extraction`">文档知识抽取</RouterLink>
       <button type="button" class="button secondary" @click="refresh">刷新知识</button>
       <button type="button" class="button secondary" @click="check">检查一致性</button>
+      <a class="button secondary" href="/metamodel/registry" target="_blank" rel="noopener">类型注册表</a>
     </div>
+    <ProjectModelWorkbench v-if="state.initialized && pid" :key="`model:${pid}`" :project-id="pid"
+      :refresh-key="deliveryRefresh" :open-by-default="!selectedId"/>
     <ProjectDesignDiagrams v-if="state.initialized && pid" :key="pid" :project-id="pid"
       :refresh-key="deliveryRefresh" :open-by-default="!selectedId"/>
     <div class="knowledge-workspace">
@@ -335,11 +342,15 @@ async function check() {
             <h3>{{ selectedEntity.name }}</h3>
             <p>{{ kinds[selectedEntity.kind] }} · v{{ selectedEntity.version }} <StatusPill :status="selectedEntity.status"/></p>
             <p class="entity-description">{{ selectedEntity.description || '暂无说明' }}</p>
-            <div class="inline-actions">
+            <RouterLink v-if="versionQuery" :to="{ path: route.path, query: { entity: entityId } }">查看此知识的当前版本</RouterLink>
+            <div v-else class="inline-actions">
               <button v-if="selectedEntity.kind !== 'Project' && selectedEntity.status !== 'archived'" type="button"
                 class="button secondary" @click="edit(selectedEntity)">修订此知识</button>
               <button type="button" class="button secondary" @click="viewHistory(selectedEntity)">历史与影响</button>
             </div>
+            <SourceEvidence :key="`${pid}:${selectedEntity.id}:${selectedEntity.version}`" :project-id="pid"
+              :entity-id="selectedEntity.id" :version="selectedEntity.version"
+              :editable="!versionQuery && selectedEntity.kind !== 'Project' && selectedEntity.status !== 'archived'"/>
             <dl class="entity-fields">
               <div v-for="(value, field) in selectedEntity.attributes" :key="field">
                 <dt>{{ fieldName('attributes.' + field) }}</dt><dd><pre>{{ readable(value) }}</pre></dd>

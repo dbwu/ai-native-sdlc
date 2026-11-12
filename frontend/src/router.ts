@@ -11,10 +11,12 @@ import ProjectKnowledgeView from './views/ProjectKnowledgeView.vue'
 import ProjectProposalsView from './views/ProjectProposalsView.vue'
 import DesignStudioView from './views/DesignStudioView.vue'
 import WorkspaceView from './views/WorkspaceView.vue'
+import KnowledgeExtractionView from './views/KnowledgeExtractionView.vue'
 
 export const router = createRouter({ history:createWebHashHistory('/workbench/'), routes:[
   { path:'/', redirect:'/projects' }, { path:'/projects', component:ProjectsView },
   { path:'/projects/:projectId/knowledge',component:ProjectKnowledgeView },
+  { path:'/projects/:projectId/knowledge/extraction/:jobId?',component:KnowledgeExtractionView },
   { path:'/projects/:projectId/proposals/:proposalId?',component:ProjectProposalsView },
   { path:'/projects/:projectId/design',component:DesignStudioView },
   { path:'/projects/:projectId/engineering',component:WorkspaceView },

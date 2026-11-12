@@ -53,6 +53,8 @@ def _metadata(kind, requirement, flow):
         lines.extend([f'- 已确认设计：{_text(flow["title"])} · 流程 v{flow["version"]}',
                       f'- 设计流程标识：`{flow["id"]}`',
                       f'- 确认时间：{flow["recorded_at"].astimezone(timezone.utc).isoformat()}'])
+        if (baseline_version := flow['definition'].get('project_model_version')) is not None:
+            lines.append(f'- 本轮设计参考的项目基线：v{baseline_version}')
         if len(flow['definition']['requirements']) > 1:
             lines.append(f'- 本设计轮次覆盖 {len(flow["definition"]["requirements"])} 条需求，以下产物按本需求筛选。')
     return lines
@@ -208,7 +210,8 @@ class RequirementDeliveries:
                 raise KnowledgeError('未找到当前项目', 404)
             rows = conn.execute("""WITH latest AS (
                 SELECT DISTINCT ON (req.id) req.id AS requirement_id, ref.version AS requirement_version,
-                       rev.document->>'name' AS requirement_name, f.id AS design_id,
+                       rev.document->>'name' AS requirement_name, f.id AS design_id, f.version AS design_version,
+                       f.state->>'design_proposal_id' AS proposal_id,
                        f.recorded_at AS confirmed_at, f.state->'design' AS design
                 FROM current_design_flows f
                 CROSS JOIN LATERAL jsonb_to_recordset(f.definition->'requirements') AS ref(id uuid, version integer)
@@ -223,7 +226,9 @@ class RequirementDeliveries:
             entries.append({
                 'requirement': {'entity_id': requirement['id'], 'name': requirement['name'], 'version': requirement['version']},
                 'design_id': row['design_id'], 'confirmed_at': row['confirmed_at'],
-                'diagrams': design_diagrams(row['design'], requirement['id'], requirements=[requirement]),
+                'diagrams': design_diagrams(row['design'], requirement['id'], requirements=[requirement],
+                    design_ref={'flow_id': str(row['design_id']), 'flow_version': row['design_version'],
+                                'proposal_id': row['proposal_id']}),
             })
         return {'entries': entries}
 
@@ -256,9 +261,13 @@ class RequirementDeliveries:
             selected = _design_info(flow)
             if not any(choice['id'] == selected['id'] for choice in choices):
                 choices.append(selected.copy())
-            diagrams = design_diagrams(flow['state']['design'], requirement_id, requirements=[requirement])
+            diagrams = design_diagrams(flow['state']['design'], requirement_id, requirements=[requirement],
+                design_ref={'flow_id': str(flow['id']), 'flow_version': flow['version'],
+                            'proposal_id': flow['state'].get('design_proposal_id')})
             selected.update(shared_requirement_count=len(flow['definition']['requirements']), diagrams=diagrams, artifacts=[
                 {field: artifact[field] for field in ('id', 'kind', 'name', 'version', 'status', 'description')} for artifact in artifacts])
+            if (baseline_version := flow['definition'].get('project_model_version')) is not None:
+                selected['project_model_version'] = baseline_version
             design_document = _document(project_id, 'design', requirement, flow, _design_document(requirement, flow, artifacts, inputs, diagrams))
         analysis = _document(project_id, 'requirements_analysis', requirement, flow, _requirements_analysis(requirement, flow, inputs, diagrams))
         return {'requirement': requirement, 'designs': choices, 'design': selected,

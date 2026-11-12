@@ -1,4 +1,7 @@
 from knowledge.design_diagrams import design_diagrams
+from knowledge.design_models import SequenceDiagram
+import pytest
+from pydantic import ValidationError
 
 
 def test_legacy_architecture_uses_explicit_component_ownership_and_relevant_nodes():
@@ -74,3 +77,47 @@ def test_collaboration_keeps_direction_and_rationale_without_inferring_links_fro
     ]
     assert 'n1 -->|读取 / 写入| n2' in collaboration['mermaid']
     assert '包含' not in collaboration['mermaid']
+
+
+def test_sequence_identity_is_explicit_and_requirement_versions_remain_fixed():
+    candidate = {'key': 'CapacityRefusal', 'title': '容量限制', 'requirement_ids': ['capacity'],
+                 'participants': [{'key': 'Student', 'name': '学生'}, {'key': 'Enrollment', 'name': '选课模块'}],
+                 'messages': [{'key': 'Request', 'source': 'Student', 'target': 'Enrollment', 'label': '提交请求'},
+                              {'key': 'Refusal', 'source': 'Enrollment', 'target': 'Student', 'label': '返回满员'}]}
+    parsed = SequenceDiagram.model_validate(candidate)
+    diagram, = design_diagrams({'components': [], 'interfaces': [], 'data_models': [],
+                                'sequence_diagrams': [parsed.model_dump(mode='json')]},
+                               requirements=[{'id': 'capacity', 'name': '容量限制', 'version': 2}])
+    assert diagram['model_refs']['identity_complete']
+    assert diagram['model_refs']['diagram_key'] == 'CapacityRefusal'
+    assert diagram['model_refs']['requirement_refs'] == [{'id': 'capacity', 'version': 2}]
+    assert [item['key'] for item in diagram['model_refs']['edges']] == ['Request', 'Refusal']
+    assert diagram['model_refs']['nodes']['p2'] == {'kind': 'participant', 'key': 'Enrollment'}
+    candidate['messages'][1]['key'] = 'Request'
+    with pytest.raises(ValidationError, match='消息稳定标识不能重复'):
+        SequenceDiagram.model_validate(candidate)
+    candidate.pop('key')
+    for message in candidate['messages']:
+        message.pop('key')
+    parsed = SequenceDiagram.model_validate(candidate)
+    diagram, = design_diagrams({'components': [], 'interfaces': [], 'data_models': [],
+                                'sequence_diagrams': [parsed.model_dump(mode='json')]})
+    assert not diagram['model_refs']['identity_complete']
+    assert all(item['key'] is None for item in diagram['model_refs']['edges'])
+
+
+def test_design_reference_is_fixed_per_diagram_and_does_not_mutate_callers():
+    design = {'components': [{'key': 'Enrollment', 'name': '选课模块', 'requirement_ids': ['capacity']}],
+              'interfaces': [], 'data_models': [], 'sequence_diagrams': [{
+                  'key': 'Submit', 'title': '提交选课', 'requirement_ids': ['capacity'],
+                  'participants': [{'key': 'Student', 'name': '学生'}, {'key': 'Enrollment', 'name': '选课模块'}],
+                  'messages': [{'key': 'Request', 'source': 'Student', 'target': 'Enrollment', 'label': '提交请求'}],
+              }]}
+    reference = {'flow_id': 'flow-a', 'flow_version': 4, 'proposal_id': 'proposal-a'}
+    diagrams = design_diagrams(design, design_ref=reference)
+    assert len(diagrams) == 2 and all(item['design_ref'] == reference for item in diagrams)
+    reference['flow_version'] = 5
+    assert all(item['design_ref']['flow_version'] == 4 for item in diagrams)
+    diagrams[0]['design_ref']['flow_version'] = 6
+    assert diagrams[1]['design_ref']['flow_version'] == 4
+    assert all('design_ref' not in item for item in design_diagrams(design))

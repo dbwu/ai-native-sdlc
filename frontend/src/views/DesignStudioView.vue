@@ -208,6 +208,7 @@ onBeforeUnmount(() => { ++generation; ++detailGeneration; stopPoll() })
       </div>
       <form v-if="showCreate" class="editor-box" @submit.prevent="create">
         <h3>只选择需求即可开始</h3>
+        <p class="section-label">项目已有已确认架构与业务流程时，创建流程会固定当前项目基线作为设计依据。</p>
         <label class="field">流程名称<input v-model="form.title" required maxlength="200" placeholder="例如：选课数量上限设计" :disabled="busy"></label>
         <label class="field">设计目标<textarea v-model="form.goal" required maxlength="4000" rows="3" placeholder="说明本轮希望解决的问题及范围" :disabled="busy"></textarea></label>
         <fieldset class="studio-choices"><legend>选择已有需求及当前版本</legend><label v-for="item in requirements" :key="item.id" class="check-field"><input v-model="form.requirements" type="checkbox" :value="item.id" :disabled="busy"><span>{{ item.name }} <small>知识版本 v{{ item.version }}</small></span></label><p v-if="!requirements.length">尚无可选需求。先到“项目知识”新建需求并明确提交提案。</p></fieldset>
@@ -223,6 +224,11 @@ onBeforeUnmount(() => { ++generation; ++detailGeneration; stopPoll() })
         <section class="panel project-panel">
           <div class="studio-heading"><h2>{{ flow.title }}</h2><span class="studio-badge" :class="{ complete: designConfirmed }">{{ statusName(flow.status) }}</span></div>
           <p>{{ flow.definition?.goal || flow.goal }}</p>
+          <p v-if="flow.definition?.project_model_version" class="section-label">
+            <RouterLink :to="{ path: `/projects/${pid}/knowledge`, query: { baseline: String(flow.definition.project_model_version) } }">
+              查看本轮固定的项目基线 v{{ flow.definition.project_model_version }}
+            </RouterLink>。生成时，基线中的架构和业务流程会一并发送给已配置的模型服务。
+          </p>
           <div class="design-stage-track" aria-label="需求设计两阶段进度"><div :class="{ done: flow.status !== 'DRAFT' }"><b>1</b><span>需求确认<small>{{ flow.status === 'DRAFT' ? '待确认' : '需求基线已记录' }}</small></span></div><div :class="{ done: designConfirmed }"><b>2</b><span>设计生成与审阅<small>{{ designConfirmed ? '已确认设计' : statusName(flow.status) }}</small></span></div></div>
           <p class="section-label">流程事件版本 {{ flow.version }}。本轮设计确认后，可在工程工作区关联设计；目前不会自动生成或执行代码。</p>
           <div v-if="flow.status === 'GENERATING'" class="info-box" role="status">模型正在生成设计，页面会更新状态。可取消流程；不会自动校验或提交生成的提案。</div>

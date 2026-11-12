@@ -4,6 +4,7 @@ import { request } from '../api/client'
 import { dateTime, kinds } from '../lib/display'
 import type { RecordData } from '../types'
 import DiagramPreview, { type DesignDiagram } from './DiagramPreview.vue'
+import SourceEvidence from './SourceEvidence.vue'
 import StatusPill from './StatusPill.vue'
 
 type DocumentKind = 'requirements_analysis' | 'design'
@@ -13,7 +14,7 @@ type DesignArtifact = { id: string; kind: string; name: string; version: number;
 type Delivery = {
   requirement: RecordData
   designs: DesignVersion[]
-  design: (DesignVersion & { shared_requirement_count: number; artifacts: DesignArtifact[]; diagrams?: DesignDiagram[] }) | null
+  design: (DesignVersion & { shared_requirement_count: number; artifacts: DesignArtifact[]; diagrams?: DesignDiagram[]; project_model_version?: number }) | null
   documents: { requirements_analysis: DeliveryDocument; design: DeliveryDocument | null }
 }
 
@@ -147,6 +148,12 @@ function changeDesign(event: Event) {
         <StatusPill :status="delivery.requirement.status"/> 需求 v{{ delivery.requirement.version }}
         <template v-if="delivery.design"> · 设计确认于 {{ dateTime(delivery.design.confirmed_at) }}</template>
       </p>
+      <RouterLink v-if="delivery.design?.project_model_version" class="text-button" :to="{
+        path: `/projects/${projectId}/knowledge`, query: { baseline: String(delivery.design.project_model_version) },
+      }">查看本轮设计参考的项目基线 v{{ delivery.design.project_model_version }}</RouterLink>
+      <SourceEvidence :key="`${projectId}:${requirementId}:${delivery.requirement.version}`" :project-id="projectId"
+        :entity-id="requirementId" :version="delivery.requirement.version"
+        :editable="!!currentRequirement && currentRequirement.status !== 'archived'"/>
       <p v-if="!delivery.design" class="info-box">此需求版本暂无已确认设计，可以先预览和下载需求分析文档。</p>
       <section v-if="delivery.design" class="delivery-artifacts" aria-label="本次设计产物">
         <h4>本次设计产物</h4>

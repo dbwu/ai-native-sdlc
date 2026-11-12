@@ -144,7 +144,20 @@ class WorkbenchService:
                 if proposal["source_id"]:
                     latest = conn.execute("SELECT max(version) AS v FROM source_revision WHERE source_id=%s", (proposal["source_id"],)).fetchone()["v"]
                     stale |= latest != proposal["source_version"]
-            return {"id": proposal["id"], "version": proposal["version"], "status": proposal["status"], "changes": changes, "stale": stale}
+                if (model := proposal["plan"].get("project_model")):
+                    latest = conn.execute("SELECT coalesce(max(version), 0) AS version FROM project_model_revision WHERE project_id=%s",
+                                          (proposal["project_id"],)).fetchone()["version"]
+                    stale |= latest + 1 != model["version"]
+                if (extraction := proposal['plan'].get('extraction')):
+                    if extraction.get('project_state_token'):
+                        from .extraction_context import project_state_token
+                        stale |= project_state_token(conn, proposal['project_id']) != extraction['project_state_token']
+                    latest = conn.execute('SELECT max(version) AS v FROM source_revision WHERE source_id=%s',
+                                          (UUID(extraction['source_id']),)).fetchone()['v']
+                    stale |= latest != extraction['source_version']
+            return {"id": proposal["id"], "project_id": proposal['project_id'], "version": proposal["version"], "status": proposal["status"], "changes": changes, "stale": stale,
+                    "extraction_review": proposal['plan'].get('extraction', {}).get('review'),
+                    "project_model_changes": proposal["plan"].get("project_model", {}).get("changes", [])}
 
     def _reference_agent(self, conn, workflow, request):
         stage = STAGES[workflow["state"]["stage"]]

@@ -1,4 +1,4 @@
-"""后台设计与代码生成任务处理器，支持应用内线程与独立命令。"""
+"""后台设计、代码生成与知识抽取处理器，支持应用内线程与独立命令。"""
 import argparse
 from contextlib import asynccontextmanager
 import logging
@@ -8,12 +8,13 @@ from threading import Event, Thread
 from .code_generation import CodeGenerationService
 from .db import database_url
 from .design import DesignService
+from .extraction import ExtractionService
 
 
 def _loop(url_provider, stop):
     while not stop.is_set():
         worked = False
-        for service in (DesignService, CodeGenerationService):
+        for service in (DesignService, CodeGenerationService, ExtractionService):
             if stop.is_set():
                 return
             try:
@@ -41,13 +42,13 @@ def design_lifespan(url_provider):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='运行模型设计与代码生成后台任务')
+    parser = argparse.ArgumentParser(description='运行模型设计、代码生成与知识抽取后台任务')
     parser.add_argument('--once', action='store_true', help='处理至多一个排队任务后退出')
     args = parser.parse_args()
     if args.once:
         url = database_url()
-        if not DesignService(url).run_next():
-            CodeGenerationService(url).run_next()
+        if not DesignService(url).run_next() and not CodeGenerationService(url).run_next():
+            ExtractionService(url).run_next()
     else:
         _loop(database_url, Event())
 
